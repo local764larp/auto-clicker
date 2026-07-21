@@ -13,3 +13,6 @@ pub mod clock;
 pub mod wait;
 pub mod sink;
 pub mod engine;
+
+#[cfg(windows)]
+pub mod sink_win32;
