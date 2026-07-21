@@ -16,3 +16,6 @@ pub mod engine;
 
 #[cfg(windows)]
 pub mod sink_win32;
+
+#[cfg(windows)]
+pub mod affinity;
