@@ -20,8 +20,10 @@ fn main() {
 mod windows_main {
     use crate::stats::{summarize, Summary};
     use clicker_core::clock::{Clock, QpcClock};
+    use clicker_core::probe::{EmitProbe, ProbedSink};
     use clicker_core::runtime::EngineHandle;
     use clicker_core::shared::{PositionMode, SharedState};
+    use clicker_core::sink_win32::SendInputSink;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, OnceLock};
     use std::time::{Duration, Instant};
@@ -139,11 +141,17 @@ mod windows_main {
         delivered: usize,
         emitted_cps: f64,
         delivered_cps: f64,
-        summary: Summary,
+        /// Emit-side intervals, taken inside the engine. This is the engine's
+        /// own timing.
+        emit: Summary,
+        /// Delivered-side intervals. Bounded by the receiver's pump cadence, so
+        /// it describes the receiver, not the engine.
+        recv: Summary,
     }
 
     fn run_cell(
         shared: &Arc<SharedState>,
+        probe: &Arc<EmitProbe>,
         interval_ns: u64,
         batch: u16,
         label: &str,
@@ -151,6 +159,7 @@ mod windows_main {
     ) -> Row {
         DELIVERED_COUNT.store(0, Ordering::Relaxed);
         delivered().lock().unwrap().clear();
+        probe.reset();
 
         shared.set_interval_ns(interval_ns);
         shared.set_batch_size(batch);
@@ -179,9 +188,13 @@ mod windows_main {
 
         let mut times = delivered().lock().unwrap().clone();
         times.sort_unstable();
-        let mut intervals: Vec<u64> = times.windows(2).map(|w| w[1].saturating_sub(w[0])).collect();
-        let summary = summarize(&mut intervals);
+        let mut recv_intervals: Vec<u64> =
+            times.windows(2).map(|w| w[1].saturating_sub(w[0])).collect();
+        let recv = summarize(&mut recv_intervals);
         let delivered_n = times.len();
+
+        let mut emit_intervals = probe.intervals();
+        let emit = summarize(&mut emit_intervals);
 
         Row {
             label: label.to_string(),
@@ -190,7 +203,8 @@ mod windows_main {
             delivered: delivered_n,
             emitted_cps: emitted as f64 / elapsed_s,
             delivered_cps: delivered_n as f64 / elapsed_s,
-            summary,
+            emit,
+            recv,
         }
     }
 
@@ -208,8 +222,14 @@ mod windows_main {
         shared.set_position_mode(PositionMode::FixedPoint);
         shared.set_fixed_point(centre.0, centre.1);
 
-        let handle = EngineHandle::start(shared.clone())
-            .expect("engine failed to start — the emergency-stop hotkey is required");
+        // Wrap the production sink so emission timing is captured inside the
+        // engine, on the same clock the scheduler uses.
+        let probe = Arc::new(EmitProbe::new(1 << 20));
+        let probe_for_engine = probe.clone();
+        let handle = EngineHandle::start_with_sink(shared.clone(), move |clock| {
+            ProbedSink::new(SendInputSink::new(), clock, probe_for_engine)
+        })
+        .expect("engine failed to start — the emergency-stop hotkey is required");
         println!("engine pinned to core {:?}", handle.pinned_core());
         println!("receiver at ({WIN_X}, {WIN_Y}), clicking its centre {centre:?}\n");
 
@@ -227,7 +247,7 @@ mod windows_main {
             (5000, "5000 CPS"),
         ] {
             let interval = 1_000_000_000u64 / cps;
-            let r = run_cell(&shared, interval, 1, label, secs);
+            let r = run_cell(&shared, &probe, interval, 1, label, secs);
             println!(
                 "  {:<12}       emitted {:>9.0} CPS   delivered {:>9.0} CPS",
                 r.label, r.emitted_cps, r.delivered_cps
@@ -238,7 +258,7 @@ mod windows_main {
         // Unthrottled sweep across batch sizes. Whether delivered CPS actually
         // rises with K is the empirical question this harness exists to answer.
         for batch in [1u16, 2, 4, 8, 16] {
-            let r = run_cell(&shared, 0, batch, "unthrottled", secs);
+            let r = run_cell(&shared, &probe, 0, batch, "unthrottled", secs);
             println!(
                 "  {:<12} K={:<3} emitted {:>9.0} CPS   delivered {:>9.0} CPS",
                 r.label, r.batch, r.emitted_cps, r.delivered_cps
@@ -246,28 +266,60 @@ mod windows_main {
             rows.push(r);
         }
 
-        println!("\n| Target | Batch K | Emitted CPS | Delivered CPS | Ratio | mean us | p50 us | p99 us | max us |");
-        println!("|---|---|---|---|---|---|---|---|---|");
+        println!("\n### Throughput\n");
+        println!("| Target | Batch K | Emitted CPS | Delivered CPS | Ratio |");
+        println!("|---|---|---|---|---|");
         for r in &rows {
             let ratio = if r.emitted > 0 { r.delivered as f64 / r.emitted as f64 } else { 0.0 };
             println!(
-                "| {} | {} | {:.0} | {:.0} | {:.1}% | {:.1} | {:.1} | {:.1} | {:.1} |",
+                "| {} | {} | {:.0} | {:.0} | {:.1}% |",
                 r.label,
                 r.batch,
                 r.emitted_cps,
                 r.delivered_cps,
-                ratio * 100.0,
-                r.summary.mean_ns / 1000.0,
-                r.summary.p50_ns as f64 / 1000.0,
-                r.summary.p99_ns as f64 / 1000.0,
-                r.summary.max_ns as f64 / 1000.0,
+                ratio * 100.0
+            );
+        }
+
+        println!("\n### Emit-side interval distribution (the engine's own timing)\n");
+        println!("| Target | Batch K | samples | mean us | p50 us | p99 us | max us |");
+        println!("|---|---|---|---|---|---|---|");
+        for r in &rows {
+            println!(
+                "| {} | {} | {} | {:.1} | {:.1} | {:.1} | {:.1} |",
+                r.label,
+                r.batch,
+                r.emit.count,
+                r.emit.mean_ns / 1000.0,
+                r.emit.p50_ns as f64 / 1000.0,
+                r.emit.p99_ns as f64 / 1000.0,
+                r.emit.max_ns as f64 / 1000.0,
+            );
+        }
+
+        println!("\n### Delivered-side interval distribution (receiver, NOT the engine)\n");
+        println!("| Target | Batch K | samples | mean us | p50 us | p99 us | max us |");
+        println!("|---|---|---|---|---|---|---|");
+        for r in &rows {
+            println!(
+                "| {} | {} | {} | {:.1} | {:.1} | {:.1} | {:.1} |",
+                r.label,
+                r.batch,
+                r.recv.count,
+                r.recv.mean_ns / 1000.0,
+                r.recv.p50_ns as f64 / 1000.0,
+                r.recv.p99_ns as f64 / 1000.0,
+                r.recv.max_ns as f64 / 1000.0,
             );
         }
 
         println!(
             "\nDelivered below emitted is expected, not a bug: SendInput serializes\n\
              through the system raw input thread and the receiver consumes on its\n\
-             own message loop."
+             own message loop.\n\n\
+             The delivered-side distribution is bounded by this harness's ~1ms pump\n\
+             cadence and describes the RECEIVER. Use the emit-side table to\n\
+             characterise the engine."
         );
     }
 }

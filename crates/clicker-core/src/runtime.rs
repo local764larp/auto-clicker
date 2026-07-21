@@ -20,7 +20,27 @@ pub struct EngineHandle {
 const NOT_PINNED: u32 = u32::MAX;
 
 impl EngineHandle {
+    /// Start with the production `SendInputSink`.
     pub fn start(shared: Arc<SharedState>) -> Result<Self, HotkeyError> {
+        Self::start_with_sink(shared, |_clock| SendInputSink::new())
+    }
+
+    /// Start with a caller-supplied sink, built on the engine thread.
+    ///
+    /// `make_sink` receives the engine's `QpcClock` so a wrapper can timestamp
+    /// against the same clock the scheduler uses. This exists so the bench can
+    /// wrap `SendInputSink` in a `ProbedSink` and measure emission timing
+    /// without the receiver's message loop in the path — the delivered-side
+    /// intervals are bounded by that loop's cadence and cannot characterise
+    /// the engine.
+    pub fn start_with_sink<F, S>(
+        shared: Arc<SharedState>,
+        make_sink: F,
+    ) -> Result<Self, HotkeyError>
+    where
+        F: FnOnce(QpcClock) -> S + Send + 'static,
+        S: crate::sink::ClickSink + Send + 'static,
+    {
         // The kill switch is registered BEFORE the engine thread exists, so
         // there is never a window in which clicks can be emitted with no way
         // to stop them.
@@ -52,7 +72,7 @@ impl EngineHandle {
                 // Everything the loop touches is built before entering it.
                 let clock = QpcClock::new();
                 let waiter = HybridWaiter::new();
-                let sink = SendInputSink::new();
+                let sink = make_sink(clock);
                 let mut engine = Engine::new(clock, waiter, sink);
 
                 // Setup complete; the loop is about to start.

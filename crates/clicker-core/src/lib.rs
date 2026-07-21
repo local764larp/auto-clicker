@@ -6,6 +6,7 @@
 
 pub mod clock;
 pub mod engine;
+pub mod probe;
 pub mod schedule;
 pub mod shared;
 pub mod sink;
