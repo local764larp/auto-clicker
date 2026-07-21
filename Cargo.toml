@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/clicker-core", "bench"]
+members = ["crates/clicker-core", "crates/clicker-gui", "bench"]
 
 [workspace.package]
 edition = "2021"
