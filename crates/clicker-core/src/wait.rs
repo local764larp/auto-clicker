@@ -174,13 +174,13 @@ mod win {
                         // SAFETY: SwitchToThread takes no arguments and cannot fail
                         // in a way that affects memory safety.
                         unsafe {
-                            SwitchToThread();
+                            let _ = SwitchToThread();
                         }
                     }
                 } else if remaining > TIER_YIELD_NS {
                     // SAFETY: as above — no pointer arguments.
                     unsafe {
-                        SwitchToThread();
+                        let _ = SwitchToThread();
                     }
                 } else {
                     // PAUSE. Meaningfully better for SMT siblings and power
@@ -194,7 +194,7 @@ mod win {
             if !self.sleep_via_timer(IDLE_POLL_NS) {
                 // SAFETY: no pointer arguments.
                 unsafe {
-                    SwitchToThread();
+                    let _ = SwitchToThread();
                 }
             }
         }
