@@ -1,0 +1,15 @@
+[package]
+name = "clicker-gui"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "clicker_gui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "clicker-gui"
+path = "src/main.rs"
+
+[dependencies]
