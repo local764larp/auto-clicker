@@ -62,7 +62,9 @@ crates/clicker-core/src/
 ├─ engine.rs        any    Engine<C: Clock, W: Waiter, S: ClickSink>
 ├─ sink_win32.rs    win    SendInput impl, batched
 ├─ hotkey.rs        win    message-only window thread owning the panic hotkey
-└─ affinity.rs      win    thread priority + cpu-set pinning, RAII guards
+├─ affinity.rs      win    thread priority + cpu-set pinning, RAII guards
+└─ runtime.rs       win    EngineHandle — assembles and owns the engine thread
+bench/src/stats.rs          percentile / jitter math (unit tested)
 bench/src/main.rs           receiver window + sweep harness
 ```
 
