@@ -15,7 +15,7 @@
 - No `unsafe` block without a comment stating the invariant that makes it sound.
 - Every raw handle and every `timeBeginPeriod` gets an RAII guard with a `Drop` impl.
 - No performance claim without a measurement backing it.
-- `clicker-core` must pass `cargo test -p clicker-core --target x86_64-unknown-linux-gnu`.
+- `clicker-core` must pass `cargo check -p clicker-core --target x86_64-unknown-linux-gnu --all-targets`. (Not `cargo test --target`: running Linux tests from this Windows host needs a `cc` cross-linker that is not installed. `cargo check --all-targets` type-checks the library *and* the test code without linking, which is exactly what the platform-neutrality constraint protects — it catches a Windows-only item leaking into a platform-neutral module.)
 - Process priority class stays default. `REALTIME_PRIORITY_CLASS` is never set anywhere.
 - `Acquire`/`Release` ordering on `running`, `shutdown`, `engine_state` only. `Relaxed` elsewhere.
 - Out of scope: kernel drivers, HID emulation, anti-cheat evasion, signature masking, detection-defeating humanization. The goal is throughput, not concealment.
@@ -383,8 +383,8 @@ Expected: PASS, 4 tests.
 
 - [ ] **Step 9: Verify the cross-target constraint holds from day one**
 
-Run: `cargo test -p clicker-core --target x86_64-unknown-linux-gnu`
-Expected: PASS, 4 tests. If this fails, a Windows-only item leaked into a platform-neutral module — fix it now, not later.
+Run: `cargo check -p clicker-core --target x86_64-unknown-linux-gnu --all-targets`
+Expected: `Finished` with no errors. If this fails, a Windows-only item leaked into a platform-neutral module — fix it now, not later.
 
 - [ ] **Step 10: Commit**
 
@@ -669,8 +669,8 @@ Expected: PASS, 14 tests.
 
 - [ ] **Step 6: Verify cross-target**
 
-Run: `cargo test -p clicker-core --target x86_64-unknown-linux-gnu`
-Expected: PASS, 18 tests total.
+Run: `cargo check -p clicker-core --target x86_64-unknown-linux-gnu --all-targets`
+Expected: `Finished` with no errors.
 
 - [ ] **Step 7: Commit**
 
@@ -1102,8 +1102,8 @@ pub mod wait;
 Run: `cargo test -p clicker-core`
 Expected: PASS, 24 tests.
 
-Run: `cargo test -p clicker-core --target x86_64-unknown-linux-gnu`
-Expected: PASS, 24 tests. The Windows modules are `cfg`-gated out and the rest still builds.
+Run: `cargo check -p clicker-core --target x86_64-unknown-linux-gnu --all-targets`
+Expected: `Finished` with no errors. The Windows modules are `cfg`-gated out and the rest still type-checks.
 
 - [ ] **Step 10: Commit**
 
@@ -1752,8 +1752,8 @@ Expected: PASS, 10 tests. Every one completes in microseconds — there is no sl
 
 - [ ] **Step 6: Verify cross-target**
 
-Run: `cargo test -p clicker-core --target x86_64-unknown-linux-gnu`
-Expected: PASS, 39 tests.
+Run: `cargo check -p clicker-core --target x86_64-unknown-linux-gnu --all-targets`
+Expected: `Finished` with no errors.
 
 - [ ] **Step 7: Commit**
 
@@ -2019,8 +2019,8 @@ Expected: PASS, 5 tests.
 
 - [ ] **Step 6: Confirm the cross-target build is unaffected**
 
-Run: `cargo test -p clicker-core --target x86_64-unknown-linux-gnu`
-Expected: PASS, 39 tests. The new module is gated out.
+Run: `cargo check -p clicker-core --target x86_64-unknown-linux-gnu --all-targets`
+Expected: `Finished` with no errors. The new module is gated out.
 
 - [ ] **Step 7: Commit**
 
@@ -2552,9 +2552,21 @@ pub mod hotkey;
 
 - [ ] **Step 5: Run the tests**
 
-Run: `cargo test -p clicker-core hotkey -- --test-threads=1`
+Run: `cargo test -p clicker-core hotkey`
 
-Expected: PASS, 3 tests. Single-threaded because two tests both register F8 and would otherwise collide with each other.
+Expected: PASS, 3 tests — under default parallelism, with no special flags.
+
+`RegisterHotKey` is system-wide: exactly one window may own a given key combination at a time, so two tests that both register F8 will collide with `ERROR_HOTKEY_ALREADY_REGISTERED` (1409). Serialize them with a module-local mutex rather than requiring `--test-threads=1`:
+
+```rust
+fn f8_guard() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let m = LOCK.get_or_init(|| Mutex::new(()));
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+```
+
+Take `let _serial = f8_guard();` as the first line of every test that registers. A test that only passes under a special flag is a test that will eventually get muted — fix the collision, don't route around it.
 
 - [ ] **Step 6: Commit**
 
