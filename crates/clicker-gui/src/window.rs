@@ -6,13 +6,15 @@
 //! loses all of them, which is the usual way a custom title bar quietly breaks
 //! window management.
 
-use crate::render::color::{Palette, Theme};
+use crate::render::color::{Palette, Rgb, Theme};
+use crate::render::device::{is_device_lost, DriverKind, RenderDevice};
+use crate::render::shadow::clamp_radius;
 use crate::render::shell::{hit_test, HitRegion, ShellMetrics};
+use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
+use windows::Win32::Graphics::Direct2D::D2D1_ROUNDED_RECT;
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, InvalidateRect, PAINTSTRUCT,
-};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
     GetDpiForWindow, GetSystemMetricsForDpi, SetProcessDpiAwarenessContext,
@@ -48,6 +50,14 @@ pub struct WindowState {
     pub palette: Palette,
     pub width: i32,
     pub height: i32,
+    pub device: Option<RenderDevice>,
+}
+
+/// Window corner radius in DIPs. Large and uniform; small radii read as flat.
+pub const WINDOW_RADIUS_DIP: f32 = 16.0;
+
+fn d2d_color(c: Rgb, a: f32) -> D2D1_COLOR_F {
+    D2D1_COLOR_F { r: c.r, g: c.g, b: c.b, a }
 }
 
 impl WindowState {
@@ -58,6 +68,7 @@ impl WindowState {
             palette: Palette::for_theme(theme),
             width: 0,
             height: 0,
+            device: None,
         }
     }
 
@@ -190,6 +201,25 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             }
         }
 
+        WM_CREATE => {
+            let p = state_ptr(hwnd);
+            if !p.is_null() {
+                // SAFETY: `p` is the state installed in WM_NCCREATE.
+                let st = unsafe { &mut *p };
+                let mut rc = RECT::default();
+                // SAFETY: `rc` is a valid writable RECT; `hwnd` is live.
+                unsafe {
+                    let _ = GetClientRect(hwnd, &mut rc);
+                }
+                let size = ((rc.right - rc.left).max(1) as u32, (rc.bottom - rc.top).max(1) as u32);
+                match RenderDevice::new(hwnd, DriverKind::Hardware, size, st.dpi_scale) {
+                    Ok(d) => st.device = Some(d),
+                    Err(e) => eprintln!("device creation failed: {e}"),
+                }
+            }
+            LRESULT(0)
+        }
+
         // Strip the visual frame while keeping the window overlapped.
         WM_NCCALCSIZE if w.0 != 0 => {
             // SAFETY: with wParam != 0, lParam points to an NCCALCSIZE_PARAMS
@@ -304,6 +334,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                 unsafe {
                     (*p).width = (l.0 & 0xFFFF) as i32;
                     (*p).height = ((l.0 >> 16) & 0xFFFF) as i32;
+                    let (cw, ch) = ((*p).width.max(1) as u32, (*p).height.max(1) as u32);
+                    if let Some(dev) = (*p).device.as_mut() {
+                        if let Err(e) = dev.resize(cw, ch) {
+                            if is_device_lost(&e.0) {
+                                let _ = dev.recreate(hwnd);
+                            }
+                        }
+                    }
                 }
             }
             LRESULT(0)
@@ -312,22 +350,27 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
         WM_PAINT => {
             let p = state_ptr(hwnd);
             let mut ps = PAINTSTRUCT::default();
-            // SAFETY: standard BeginPaint/EndPaint pairing; `ps` is valid and
-            // the brush is deleted before returning.
+            // SAFETY: standard BeginPaint/EndPaint pairing around the frame.
             unsafe {
-                let hdc = BeginPaint(hwnd, &mut ps);
-                let base = if p.is_null() {
-                    Palette::light().base
-                } else {
-                    (*p).palette.base
-                };
-                let q = |c: f32| (c.clamp(0.0, 1.0) * 255.0) as u32;
-                let brush =
-                    CreateSolidBrush(COLORREF(q(base.r) | (q(base.g) << 8) | (q(base.b) << 16)));
-                let mut rc = RECT::default();
-                let _ = GetClientRect(hwnd, &mut rc);
-                FillRect(hdc, &rc, brush);
-                let _ = DeleteObject(brush.into());
+                let _ = BeginPaint(hwnd, &mut ps);
+            }
+            if !p.is_null() {
+                // SAFETY: `p` is live state owned by this window.
+                let st = unsafe { &mut *p };
+                if let Err(e) = paint(hwnd, st) {
+                    // A lost device is expected after driver updates and GPU
+                    // resets; rebuild rather than leaving a black window.
+                    if is_device_lost(&e.0) {
+                        if let Some(dev) = st.device.as_mut() {
+                            let _ = dev.recreate(hwnd);
+                        }
+                    } else {
+                        eprintln!("paint failed: {e}");
+                    }
+                }
+            }
+            // SAFETY: paired with BeginPaint above.
+            unsafe {
                 let _ = EndPaint(hwnd, &ps);
             }
             LRESULT(0)
@@ -358,4 +401,50 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
         // SAFETY: forwarding unhandled messages with the arguments received.
         _ => unsafe { DefWindowProcW(hwnd, msg, w, l) },
     }
+}
+
+/// Draw one frame.
+///
+/// Clears to fully transparent and then fills a rounded rect with the base
+/// colour. The transparent margin is the proof that DirectComposition is doing
+/// its job: on a plain HWND swapchain those corners would be black.
+fn paint(hwnd: HWND, st: &mut WindowState) -> Result<(), crate::render::device::RenderError> {
+    let Some(dev) = st.device.as_mut() else { return Ok(()) };
+
+    let mut rc = RECT::default();
+    // SAFETY: `rc` is a valid writable RECT; `hwnd` is live.
+    unsafe {
+        let _ = GetClientRect(hwnd, &mut rc);
+    }
+    let scale = st.dpi_scale;
+    let w_dip = (rc.right - rc.left) as f32 / scale;
+    let h_dip = (rc.bottom - rc.top) as f32 / scale;
+
+    // A maximized window sits flush against the screen edges, so rounding it
+    // would leave transparent notches over the desktop.
+    let radius = if WindowState::is_maximized(hwnd) {
+        0.0
+    } else {
+        clamp_radius(WINDOW_RADIUS_DIP, w_dip, h_dip)
+    };
+
+    dev.begin_draw();
+    // SAFETY: the context has a bound target between begin_draw and end_draw.
+    unsafe {
+        dev.ctx.Clear(Some(&d2d_color(Rgb::new(0.0, 0.0, 0.0), 0.0)));
+
+        let brush = dev
+            .ctx
+            .CreateSolidColorBrush(&d2d_color(st.palette.base, 1.0), None)?;
+
+        let rr = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F { left: 0.0, top: 0.0, right: w_dip, bottom: h_dip },
+            radiusX: radius,
+            radiusY: radius,
+        };
+        dev.ctx.FillRoundedRectangle(&rr, &brush);
+    }
+    dev.end_draw()?;
+    dev.present()?;
+    Ok(())
 }
