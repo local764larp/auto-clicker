@@ -372,3 +372,173 @@ pub unsafe fn draw_surface(ctx: &ID2D1DeviceContext, s: &RenderedSurface, x: f32
         }
     }
 }
+
+#[cfg(all(test, windows))]
+mod golden {
+    //! Deterministic golden checks on WARP.
+    //!
+    //! WARP is bit-identical across machines, so these render offscreen and
+    //! assert the neumorphic invariants directly on the pixels — light comes
+    //! from the top-left, raised casts an outer halo, inset a recessed inner
+    //! shadow, flat none. Property assertions rather than stored PNGs: they need
+    //! no bless step, give a legible failure, and encode the design rules that
+    //! actually regress. The inset direction bug this module would have caught
+    //! was found by eye during development; now it is caught automatically.
+
+    use super::*;
+    use crate::render::color::{Palette, Rgb, Theme};
+    use crate::render::device::{create_context, DriverKind};
+    use windows::Win32::Graphics::Direct2D::{
+        D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_CPU_READ, D2D1_MAP_OPTIONS_READ,
+    };
+
+    struct Image {
+        w: usize,
+        h: usize,
+        /// Straight BGRA, row-major, tightly packed.
+        px: Vec<u8>,
+    }
+
+    impl Image {
+        /// Perceptual luminance at a pixel, 0..255.
+        fn lum(&self, x: usize, y: usize) -> f32 {
+            let i = (y * self.w + x) * 4;
+            let b = self.px[i] as f32;
+            let g = self.px[i + 1] as f32;
+            let r = self.px[i + 2] as f32;
+            0.2126 * r + 0.7152 * g + 0.0722 * b
+        }
+    }
+
+    /// Render a surface on WARP over an opaque base, read the pixels back.
+    ///
+    /// Compositing over an opaque base keeps every sample opaque, so luminance
+    /// comparisons are clean rather than tangled with premultiplied alpha.
+    fn render_over_base(elevation: Elevation, palette: &Palette) -> (Image, f32, usize) {
+        let (_d3d, ctx) = create_context(DriverKind::Warp).expect("WARP context");
+        let side = 100.0f32;
+
+        let surf = render_surface(&ctx, side, side, 16.0, elevation, palette, 1.0)
+            .expect("render_surface");
+        let margin = surf.margin_dip;
+
+        // SAFETY: WARP context is live; every bitmap and draw call below is
+        // matched and the staging bitmap is mapped/unmapped in pairs.
+        unsafe {
+            let bw = (side + 2.0 * margin).ceil() as u32;
+            let bh = bw;
+
+            let props = bitmap_props(96.0);
+            let target = ctx.CreateBitmap(D2D_SIZE_U { width: bw, height: bh }, None, 0, &props)
+                .expect("target");
+            ctx.SetTarget(&target);
+            ctx.BeginDraw();
+            ctx.Clear(Some(&color_f(palette.base, 1.0)));
+            draw_surface(&ctx, &surf, margin, margin);
+            ctx.EndDraw(None, None).expect("enddraw");
+
+            // Stage a CPU-readable copy.
+            let mut sprops = bitmap_props(96.0);
+            sprops.bitmapOptions = D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW;
+            let staging = ctx
+                .CreateBitmap(D2D_SIZE_U { width: bw, height: bh }, None, 0, &sprops)
+                .expect("staging");
+            staging.CopyFromBitmap(None, &target, None).expect("copy");
+
+            let mapped = staging.Map(D2D1_MAP_OPTIONS_READ).expect("map");
+            let mut px = vec![0u8; (bw * bh * 4) as usize];
+            for row in 0..bh as usize {
+                let src = mapped.bits.add(row * mapped.pitch as usize);
+                let dst = &mut px[row * bw as usize * 4..(row + 1) * bw as usize * 4];
+                core::ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), bw as usize * 4);
+            }
+            staging.Unmap().expect("unmap");
+            ctx.SetTarget(None);
+
+            (Image { w: bw as usize, h: bh as usize, px }, margin, side as usize)
+        }
+    }
+
+    #[test]
+    fn raised_casts_light_up_left_and_dark_down_right() {
+        for palette in [Palette::light(), Palette::dark()] {
+            let (img, m, side) = render_over_base(Elevation::Raised, &palette);
+            let mi = m as usize;
+            let mid = mi + side / 2;
+            let base = img.lum(mid, mid);
+
+            // Exterior halo, sampled just outside the middle of each edge.
+            let top = img.lum(mid, mi.saturating_sub(6));
+            let bottom = img.lum(mid, mi + side + 6);
+
+            assert!(
+                top > base + 2.0,
+                "{:?}: top halo {top:.1} should be lighter than base {base:.1}",
+                palette.theme
+            );
+            assert!(
+                bottom < base - 2.0,
+                "{:?}: bottom halo {bottom:.1} should be darker than base {base:.1}",
+                palette.theme
+            );
+            assert!(top > bottom, "{:?}: light must be up, dark down", palette.theme);
+        }
+    }
+
+    #[test]
+    fn inset_recesses_dark_at_top_left() {
+        for palette in [Palette::light(), Palette::dark()] {
+            let (img, m, side) = render_over_base(Elevation::Inset, &palette);
+            let mi = m as usize;
+
+            // Interior, near opposite corners.
+            let tl = img.lum(mi + 12, mi + 12);
+            let br = img.lum(mi + side - 12, mi + side - 12);
+            assert!(
+                tl < br,
+                "{:?}: inset top-left interior {tl:.1} should be darker than bottom-right {br:.1}",
+                palette.theme
+            );
+
+            // And no outer halo: just outside the edge is essentially the base.
+            let base = img.lum(mi + side / 2, mi + side / 2);
+            let outside = img.lum(mi + side / 2, mi + side + 8);
+            assert!(
+                (outside - base).abs() < 12.0,
+                "{:?}: inset should not cast an outer halo (outside {outside:.1} vs base {base:.1})",
+                palette.theme
+            );
+        }
+    }
+
+    #[test]
+    fn flat_has_no_depth() {
+        let palette = Palette::light();
+        let (img, m, side) = render_over_base(Elevation::Flat, &palette);
+        let mi = m as usize;
+        let base = img.lum(mi + side / 2, mi + side / 2);
+
+        // Every corner and edge of the interior sits at the base luminance.
+        for (x, y) in [
+            (mi + 8, mi + 8),
+            (mi + side - 8, mi + 8),
+            (mi + 8, mi + side - 8),
+            (mi + side - 8, mi + side - 8),
+        ] {
+            let l = img.lum(x, y);
+            assert!(
+                (l - base).abs() < 4.0,
+                "flat should be uniform: corner {l:.1} vs centre {base:.1}"
+            );
+        }
+    }
+
+    #[test]
+    fn warp_output_is_reproducible() {
+        // The premise of using WARP for goldens: two renders are identical.
+        let p = Palette::for_theme(Theme::Light);
+        let a = render_over_base(Elevation::Raised, &p).0;
+        let b = render_over_base(Elevation::Raised, &p).0;
+        assert_eq!(a.px, b.px, "WARP render was not bit-reproducible");
+    }
+}

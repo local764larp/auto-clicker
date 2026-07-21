@@ -397,6 +397,25 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             unsafe { DefWindowProcW(hwnd, msg, w, l) }
         }
 
+        // Playground affordance: T toggles the theme so both bases can be
+        // judged live; the neumorphic illusion has to hold in each.
+        WM_KEYDOWN if w.0 as u32 == 0x54 => {
+            let p = state_ptr(hwnd);
+            if !p.is_null() {
+                // SAFETY: `p` is live state owned by this window.
+                unsafe {
+                    let next = match (*p).palette.theme {
+                        Theme::Light => Theme::Dark,
+                        Theme::Dark => Theme::Light,
+                    };
+                    (*p).palette = Palette::for_theme(next);
+                    (*p).demo.clear(); // force surfaces to re-render for the new palette
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
+            }
+            LRESULT(0)
+        }
+
         WM_DESTROY => {
             // SAFETY: no pointer arguments.
             unsafe {
