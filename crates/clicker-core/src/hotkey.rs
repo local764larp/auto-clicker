@@ -178,20 +178,9 @@ impl Drop for PanicHotkey {
 mod tests {
     use super::*;
     use crate::shared::SharedState;
-    use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+    use crate::testlock::f8_guard;
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
-
-    /// `RegisterHotKey` is system-wide: exactly one window may own a given key
-    /// combination at a time. Tests that actually register F8 must therefore
-    /// run one at a time, or the second gets ERROR_HOTKEY_ALREADY_REGISTERED
-    /// (1409). Serializing here rather than relying on `--test-threads=1`
-    /// keeps a plain `cargo test` green — a test that only passes under a
-    /// special flag is a test that will get muted.
-    fn f8_guard() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let m = LOCK.get_or_init(|| Mutex::new(()));
-        m.lock().unwrap_or_else(|e| e.into_inner())
-    }
 
     #[test]
     fn registers_and_unregisters_cleanly() {

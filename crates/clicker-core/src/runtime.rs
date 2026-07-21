@@ -30,6 +30,14 @@ impl EngineHandle {
         let pinned_for_thread = pinned_core.clone();
         let shared_for_thread = shared.clone();
 
+        // `start` must not return before the engine thread has pinned itself,
+        // raised its priority, and constructed everything the loop touches.
+        // Without this the caller races the thread's setup: `pinned_core()`
+        // reads NOT_PINNED and reports "unpinned" for a thread that is about
+        // to pin perfectly well, and a caller could set `running` before the
+        // engine is configured.
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+
         let thread = std::thread::Builder::new()
             .name("clicker-engine".into())
             .spawn(move || {
@@ -47,9 +55,16 @@ impl EngineHandle {
                 let sink = SendInputSink::new();
                 let mut engine = Engine::new(clock, waiter, sink);
 
+                // Setup complete; the loop is about to start.
+                let _ = ready_tx.send(());
+
                 engine.run(&shared_for_thread);
             })
             .expect("failed to spawn engine thread");
+
+        // If the thread died during setup the channel closes and recv errors;
+        // either way we proceed only once setup is settled.
+        let _ = ready_rx.recv();
 
         Ok(Self { shared, thread: Some(thread), pinned_core, _hotkey: hotkey })
     }
@@ -77,11 +92,13 @@ impl Drop for EngineHandle {
 mod tests {
     use super::*;
     use crate::shared::SharedState;
+    use crate::testlock::f8_guard;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     #[test]
     fn starts_idle_and_shuts_down_cleanly() {
+        let _serial = f8_guard();
         let shared = Arc::new(SharedState::new());
         let h = EngineHandle::start(shared.clone()).unwrap();
         std::thread::sleep(Duration::from_millis(50));
@@ -90,11 +107,25 @@ mod tests {
         assert!(shared.shutdown());
     }
 
+    #[test]
+    fn pinned_core_is_reported_without_racing_thread_setup() {
+        let _serial = f8_guard();
+        // `start` returning before the engine thread pinned itself made
+        // `pinned_core()` report None for a thread that pinned fine.
+        let shared = Arc::new(SharedState::new());
+        let h = EngineHandle::start(shared.clone()).unwrap();
+        assert!(
+            h.pinned_core().is_some(),
+            "engine thread should be pinned by the time start() returns"
+        );
+    }
+
     /// Emits real clicks. Ignored by default so it never fires during an
     /// ordinary `cargo test` run and starts clicking the developer's desktop.
     #[test]
     #[ignore = "moves the real mouse; run explicitly"]
     fn emits_a_bounded_burst_and_stops_at_the_limit() {
+        let _serial = f8_guard();
         let shared = Arc::new(SharedState::new());
         shared.set_interval_ns(10_000_000); // 100 CPS
         shared.set_limit_clicks(5);
