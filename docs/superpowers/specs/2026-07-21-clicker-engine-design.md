@@ -175,8 +175,14 @@ pub trait ClickSink {
 ### 6.1 Batching — the throughput decision
 
 `SendInput` accepts an array of N events, so `[INPUT; 2*K]` delivers **K clicks in one syscall**.
-The brief's "one syscall per click, not two" is correct but incomplete; batching is the largest
-remaining user-mode win.
+The brief's "one syscall per click, not two" is correct but incomplete.
+
+> **MEASURED 2026-07-21 — this hypothesis was wrong.** This section originally claimed batching
+> was "the largest remaining user-mode win." The Phase 2 sweep falsified it: batching raises
+> *emitted* CPS by up to 42% while *delivered* CPS falls and the delivery ratio collapses from
+> 99.4% (K=1) to 56.5% (K=16). It is a vanity metric — a bigger counter for less real work.
+> `K = 1` is the correct default. See [`bench/results/README.md`](../../../bench/results/README.md).
+> The text below is retained as the original design rationale; the sweep axis did its job.
 
 - Applies **only** in unthrottled mode. Batched events carry no temporal spacing, so batching a
   throttled rate would destroy the requested interval.
