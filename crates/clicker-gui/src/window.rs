@@ -441,25 +441,21 @@ fn paint(hwnd: HWND, st: &mut WindowState) -> Result<(), crate::render::device::
     let key = (rc.right as u32, rc.bottom as u32, (scale * 100.0) as u32);
     if key != st.demo_key || st.demo.is_empty() {
         st.demo.clear();
-        // Three raised panels down the centre, so the shadow is judged at more
-        // than one size. Positions are surface-rect top-lefts, in DIPs.
+        // One column per elevation so the three read against each other:
+        // raised (extruded), inset (pressed), flat. Positions are surface-rect
+        // top-lefts, in DIPs.
         let specs = [
-            (200.0f32, 64.0f32, 60.0f32),
-            (160.0, 160.0, 150.0),
-            (110.0, 110.0, 360.0),
+            (Elevation::Raised, 130.0f32, 90.0f32, 70.0f32, 70.0f32),
+            (Elevation::Inset, 130.0, 90.0, 70.0, 210.0),
+            (Elevation::Flat, 130.0, 90.0, 70.0, 350.0),
+            (Elevation::Raised, 130.0, 60.0, 270.0, 70.0),
+            (Elevation::Inset, 130.0, 60.0, 270.0, 210.0),
         ];
-        for (sw, sh, sy) in specs {
-            let x = (w_dip - sw) / 2.0;
-            if let Ok(surf) = neumorph::render_surface(
-                &dev.ctx,
-                sw,
-                sh,
-                20.0,
-                Elevation::Raised,
-                &st.palette,
-                scale,
-            ) {
-                st.demo.push((surf, x, sy));
+        for (elev, sw, sh, sx, sy) in specs {
+            if let Ok(surf) =
+                neumorph::render_surface(&dev.ctx, sw, sh, 20.0, elev, &st.palette, scale)
+            {
+                st.demo.push((surf, sx, sy));
             }
         }
         st.demo_key = key;

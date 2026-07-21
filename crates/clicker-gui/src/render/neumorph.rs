@@ -20,16 +20,19 @@ use crate::render::color::{Palette, Rgb};
 use crate::render::device::RenderError;
 use crate::render::shadow::{clamp_radius, shadow_offsets, shadow_params, surface_gradient, Elevation};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_COMPOSITE_MODE_SOURCE_OVER,
-    D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_COMPOSITE_MODE_DESTINATION_OUT,
+    D2D1_COMPOSITE_MODE_SOURCE_IN, D2D1_COMPOSITE_MODE_SOURCE_OVER, D2D1_GRADIENT_STOP,
+    D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
-    ID2D1Bitmap1, ID2D1DeviceContext, ID2D1Image, CLSID_D2D12DAffineTransform, CLSID_D2D1Shadow,
-    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_BUFFER_PRECISION_8BPC_UNORM,
-    D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED, D2D1_COLOR_SPACE_SRGB,
-    D2D1_EXTEND_MODE_CLAMP, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
-    D2D1_PROPERTY_TYPE_FLOAT, D2D1_PROPERTY_TYPE_MATRIX_3X2, D2D1_PROPERTY_TYPE_VECTOR4,
-    D2D1_ROUNDED_RECT, D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION, D2D1_SHADOW_PROP_COLOR,
+    ID2D1Bitmap1, ID2D1DeviceContext, ID2D1Image, CLSID_D2D12DAffineTransform, CLSID_D2D1Composite,
+    CLSID_D2D1GaussianBlur, CLSID_D2D1Shadow, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
+    D2D1_BUFFER_PRECISION_8BPC_UNORM, D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED,
+    D2D1_COLOR_SPACE_SRGB, D2D1_COMPOSITE_PROP_MODE, D2D1_EXTEND_MODE_CLAMP,
+    D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, D2D1_INTERPOLATION_MODE_LINEAR,
+    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_PROPERTY_TYPE_ENUM, D2D1_PROPERTY_TYPE_FLOAT,
+    D2D1_PROPERTY_TYPE_MATRIX_3X2, D2D1_PROPERTY_TYPE_VECTOR4, D2D1_ROUNDED_RECT,
+    D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION, D2D1_SHADOW_PROP_COLOR,
     D2D1_2DAFFINETRANSFORM_PROP_TRANSFORM_MATRIX,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -105,6 +108,11 @@ unsafe fn set_translation(
         let _ = e.SetValue(idx, D2D1_PROPERTY_TYPE_MATRIX_3X2, &bytes);
     }
 }
+unsafe fn set_enum(e: &windows::Win32::Graphics::Direct2D::ID2D1Effect, idx: u32, v: u32) {
+    unsafe {
+        let _ = e.SetValue(idx, D2D1_PROPERTY_TYPE_ENUM, &v.to_le_bytes());
+    }
+}
 
 /// Render a neumorphic surface into a fresh bitmap.
 ///
@@ -164,17 +172,34 @@ pub fn render_surface(
         }
         ctx.EndDraw(None, None)?;
 
-        // --- output: shadows, then the surface fill with its gradient on top. ---
+        let sil_img: ID2D1Image = windows::core::Interface::cast(&silhouette)?;
+        let (light_off, dark_off) = shadow_offsets(elevation, params.offset_dip);
+        let whole = D2D_RECT_F { left: 0.0, top: 0.0, right: bmp_w, bottom: bmp_h };
+
+        // Inset needs inverted, tinted masks built up front (their own draw
+        // session), because the inner shadow is the shape's alpha inverted,
+        // blurred, and clipped back inside — there is no built-in effect for it.
+        let inset_masks = if matches!(elevation, Elevation::Inset) {
+            let dark = inverted_tint(
+                ctx, size, dpi, &whole, &sil_img, palette.shadow_dark, params.dark_alpha,
+            )?;
+            let light = inverted_tint(
+                ctx, size, dpi, &whole, &sil_img, palette.shadow_light, params.light_alpha,
+            )?;
+            Some((dark, light))
+        } else {
+            None
+        };
+
+        // --- output: raised shadows go beneath the fill; inset shadows above. ---
         let output = ctx.CreateBitmap(size, None, 0, &props)?;
         ctx.SetTarget(&output);
         ctx.BeginDraw();
         ctx.Clear(Some(&color_f(Rgb::new(0.0, 0.0, 0.0), 0.0)));
 
-        if !matches!(elevation, Elevation::Flat) {
-            let (light_off, dark_off) = shadow_offsets(elevation, params.offset_dip);
-            let sil_img: ID2D1Image = windows::core::Interface::cast(&silhouette)?;
-
-            // Dark shadow first (down-right for raised), then light on top.
+        // Raised: outer dual shadow, dark down-right then light up-left, drawn
+        // BENEATH the surface so only the halo shows around the edges.
+        if matches!(elevation, Elevation::Raised) {
             for (color, alpha, (dx, dy)) in [
                 (palette.shadow_dark, params.dark_alpha, dark_off),
                 (palette.shadow_light, params.light_alpha, light_off),
@@ -188,9 +213,8 @@ pub fn render_surface(
                     [color.r, color.g, color.b, alpha],
                 );
 
-                // Translate the (blurred) shadow via an affine transform, which
-                // keeps the effect graph in the same coordinate space rather
-                // than relying on a DrawImage offset.
+                // Translate via an affine transform so the effect graph stays in
+                // one coordinate space rather than relying on a DrawImage offset.
                 let affine = ctx.CreateEffect(&CLSID_D2D12DAffineTransform)?;
                 let shadow_out = shadow.GetOutput()?;
                 affine.SetInput(0, &shadow_out, true);
@@ -212,7 +236,7 @@ pub fn render_surface(
             }
         }
 
-        // Surface fill with the diagonal gradient on top of the halo.
+        // Surface fill with the diagonal gradient.
         let (g_start, g_end) = surface_gradient(palette.base, elevation);
         let stops = [
             D2D1_GRADIENT_STOP { position: 0.0, color: color_f(g_start, 1.0) },
@@ -234,12 +258,97 @@ pub fn render_surface(
         let brush = ctx.CreateLinearGradientBrush(&grad_props, None, &collection)?;
         ctx.FillRoundedRectangle(&rr, &brush);
 
+        // Inset: inner shadows drawn ON TOP of the fill, dark up-left and light
+        // down-right, each clipped to the shape interior.
+        if let Some((dark, light)) = &inset_masks {
+            for (mask, (dx, dy)) in [(dark, dark_off), (light, light_off)] {
+                let mask_img: ID2D1Image = windows::core::Interface::cast(mask)?;
+
+                // Inner shadows invert the translation of outer ones: the mask
+                // is a hole, so shifting it down-right leaves the opaque spill
+                // in the TOP-LEFT interior. To land the dark shadow where
+                // `dark_off` points (top-left), the mask moves the other way.
+                let affine = ctx.CreateEffect(&CLSID_D2D12DAffineTransform)?;
+                affine.SetInput(0, &mask_img, true);
+                set_translation(
+                    &affine,
+                    D2D1_2DAFFINETRANSFORM_PROP_TRANSFORM_MATRIX.0 as u32,
+                    -dx,
+                    -dy,
+                );
+
+                let blur = ctx.CreateEffect(&CLSID_D2D1GaussianBlur)?;
+                let aff_out = affine.GetOutput()?;
+                blur.SetInput(0, &aff_out, true);
+                set_f32(&blur, D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION.0 as u32, stddev);
+
+                // Clip the blurred spill back inside the shape: keep the blur
+                // (input 0) only where the silhouette (input 1) is opaque.
+                let comp = ctx.CreateEffect(&CLSID_D2D1Composite)?;
+                let blur_out = blur.GetOutput()?;
+                comp.SetInput(0, &blur_out, true);
+                comp.SetInput(1, &sil_img, true);
+                set_enum(
+                    &comp,
+                    D2D1_COMPOSITE_PROP_MODE.0 as u32,
+                    D2D1_COMPOSITE_MODE_SOURCE_IN.0 as u32,
+                );
+
+                let comp_out = comp.GetOutput()?;
+                ctx.DrawImage(
+                    &comp_out,
+                    None,
+                    None,
+                    D2D1_INTERPOLATION_MODE_LINEAR,
+                    D2D1_COMPOSITE_MODE_SOURCE_OVER,
+                );
+            }
+        }
+
         ctx.EndDraw(None, None)?;
 
         // Restore the caller's target.
         ctx.SetTarget(previous.as_ref());
 
         Ok(RenderedSurface { bitmap: output, margin_dip: margin, width_dip: w, height_dip: h })
+    }
+}
+
+/// Build an inverted, tinted alpha mask: opaque `tint` at `alpha` everywhere
+/// outside the shape, transparent inside. Used as the seed for an inner shadow.
+///
+/// # Safety
+/// `ctx` must be a live device context not currently inside a `BeginDraw`.
+unsafe fn inverted_tint(
+    ctx: &ID2D1DeviceContext,
+    size: D2D_SIZE_U,
+    dpi: f32,
+    whole: &D2D_RECT_F,
+    silhouette: &ID2D1Image,
+    tint: Rgb,
+    alpha: f32,
+) -> Result<ID2D1Bitmap1, RenderError> {
+    let props = bitmap_props(dpi);
+    // SAFETY: caller contract — ctx is live and not mid-draw. The intermediate
+    // BeginDraw is matched by EndDraw; the previous target is the caller's
+    // responsibility to restore (render_surface does).
+    unsafe {
+        let bmp = ctx.CreateBitmap(size, None, 0, &props)?;
+        ctx.SetTarget(&bmp);
+        ctx.BeginDraw();
+        ctx.Clear(Some(&color_f(Rgb::new(0.0, 0.0, 0.0), 0.0)));
+        // Flood the tint, then punch the shape out with DESTINATION_OUT.
+        let brush = ctx.CreateSolidColorBrush(&color_f(tint, alpha), None)?;
+        ctx.FillRectangle(whole, &brush);
+        ctx.DrawImage(
+            silhouette,
+            None,
+            None,
+            D2D1_INTERPOLATION_MODE_LINEAR,
+            D2D1_COMPOSITE_MODE_DESTINATION_OUT,
+        );
+        ctx.EndDraw(None, None)?;
+        Ok(bmp)
     }
 }
 
