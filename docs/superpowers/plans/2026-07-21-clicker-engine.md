@@ -2552,9 +2552,21 @@ pub mod hotkey;
 
 - [ ] **Step 5: Run the tests**
 
-Run: `cargo test -p clicker-core hotkey -- --test-threads=1`
+Run: `cargo test -p clicker-core hotkey`
 
-Expected: PASS, 3 tests. Single-threaded because two tests both register F8 and would otherwise collide with each other.
+Expected: PASS, 3 tests — under default parallelism, with no special flags.
+
+`RegisterHotKey` is system-wide: exactly one window may own a given key combination at a time, so two tests that both register F8 will collide with `ERROR_HOTKEY_ALREADY_REGISTERED` (1409). Serialize them with a module-local mutex rather than requiring `--test-threads=1`:
+
+```rust
+fn f8_guard() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let m = LOCK.get_or_init(|| Mutex::new(()));
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+```
+
+Take `let _serial = f8_guard();` as the first line of every test that registers. A test that only passes under a special flag is a test that will eventually get muted — fix the collision, don't route around it.
 
 - [ ] **Step 6: Commit**
 

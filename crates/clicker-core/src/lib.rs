@@ -19,3 +19,6 @@ pub mod sink_win32;
 
 #[cfg(windows)]
 pub mod affinity;
+
+#[cfg(windows)]
+pub mod hotkey;
