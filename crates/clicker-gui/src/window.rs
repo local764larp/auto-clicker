@@ -8,7 +8,8 @@
 
 use crate::render::color::{Palette, Rgb, Theme};
 use crate::render::device::{is_device_lost, DriverKind, RenderDevice};
-use crate::render::shadow::clamp_radius;
+use crate::render::neumorph::{self, RenderedSurface};
+use crate::render::shadow::{clamp_radius, Elevation};
 use crate::render::shell::{hit_test, HitRegion, ShellMetrics};
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
 use windows::Win32::Graphics::Direct2D::D2D1_ROUNDED_RECT;
@@ -51,6 +52,10 @@ pub struct WindowState {
     pub width: i32,
     pub height: i32,
     pub device: Option<RenderDevice>,
+    /// Temporary S2-5 demo surfaces, cached until size/DPI changes. Replaced by
+    /// real widgets in Spec 3.
+    pub demo: Vec<(RenderedSurface, f32, f32)>,
+    pub demo_key: (u32, u32, u32),
 }
 
 /// Window corner radius in DIPs. Large and uniform; small radii read as flat.
@@ -69,6 +74,8 @@ impl WindowState {
             width: 0,
             height: 0,
             device: None,
+            demo: Vec::new(),
+            demo_key: (0, 0, 0),
         }
     }
 
@@ -428,6 +435,36 @@ fn paint(hwnd: HWND, st: &mut WindowState) -> Result<(), crate::render::device::
         clamp_radius(WINDOW_RADIUS_DIP, w_dip, h_dip)
     };
 
+    // Refresh the demo surfaces if size or DPI changed. This runs OUTSIDE the
+    // main BeginDraw, because render_surface opens its own draw sessions — the
+    // caching layer the brief calls for, in miniature.
+    let key = (rc.right as u32, rc.bottom as u32, (scale * 100.0) as u32);
+    if key != st.demo_key || st.demo.is_empty() {
+        st.demo.clear();
+        // Three raised panels down the centre, so the shadow is judged at more
+        // than one size. Positions are surface-rect top-lefts, in DIPs.
+        let specs = [
+            (200.0f32, 64.0f32, 60.0f32),
+            (160.0, 160.0, 150.0),
+            (110.0, 110.0, 360.0),
+        ];
+        for (sw, sh, sy) in specs {
+            let x = (w_dip - sw) / 2.0;
+            if let Ok(surf) = neumorph::render_surface(
+                &dev.ctx,
+                sw,
+                sh,
+                20.0,
+                Elevation::Raised,
+                &st.palette,
+                scale,
+            ) {
+                st.demo.push((surf, x, sy));
+            }
+        }
+        st.demo_key = key;
+    }
+
     dev.begin_draw();
     // SAFETY: the context has a bound target between begin_draw and end_draw.
     unsafe {
@@ -443,6 +480,11 @@ fn paint(hwnd: HWND, st: &mut WindowState) -> Result<(), crate::render::device::
             radiusY: radius,
         };
         dev.ctx.FillRoundedRectangle(&rr, &brush);
+
+        for (surf, x, y) in &st.demo {
+            // SAFETY: inside begin_draw/end_draw, on a live context.
+            neumorph::draw_surface(&dev.ctx, surf, *x, *y);
+        }
     }
     dev.end_draw()?;
     dev.present()?;
