@@ -116,6 +116,34 @@ delivered p50 of 37 µs against a 500 µs mean is the pump cadence showing throu
 emit-side p50 for the same cell is exactly 500.0 µs. Use the emit-side table for any statement
 about engine timing.
 
+## Manual verification status
+
+| Check | Status |
+|---|---|
+| F8 emergency stop while the engine saturates a core | **Verified** 2026-07-21 via `--example soak`. Clicking stopped on keypress; the machine stayed usable. Also automated as pass 4 of `--example shutdown_diag`, which synthesizes the keypress: `running` cleared in ~10 ms. |
+| Shutdown is bounded when the engine thread wedges | **Verified** — `runtime::tests::shutdown_is_bounded_even_if_the_sink_wedges`. |
+| UIPI-blocked target surfaces `SinkError::Blocked` rather than a silent no-op | Not yet verified — needs an elevated foreground window. |
+| Hybrid P-core selection on real Intel 12th-gen+ silicon | Cannot be verified on this machine (homogeneous Ryzen 5 7600). Unit-tested only. |
+| `timeBeginPeriod` fallback path | Not yet verified — needs the high-resolution timer branch forced off. |
+
+## Operational hazard: follow-cursor at ceiling rates
+
+The first soak run hung — the process survived 2m12s past its own 20s bound, engine thread parked
+in a syscall. Investigation (`--example shutdown_diag`) ruled out the engine loop, throttled
+`SendInput`, unthrottled `SendInput`, and the F8 path: all four shut down in 0.4–2 ms.
+
+The remaining difference was that soak runs in **follow-cursor** mode, so at ~4,000 CPS it clicks
+whatever desktop UI is under the pointer. `SendInput` blocks when the target thread's input queue
+saturates, and an unresponsive target can therefore wedge the engine thread indefinitely.
+
+`EngineHandle::drop` previously joined unconditionally, so a wedged thread hung the process
+forever. **An unkillable clicker is the exact failure mode the emergency stop exists to prevent**,
+so shutdown is now bounded by `SHUTDOWN_TIMEOUT` (2 s) and detaches with a diagnostic message
+rather than hanging. Healthy shutdown is unaffected at ~2 ms.
+
+Practical consequence: prefer fixed-point mode when running at ceiling rates. Follow-cursor
+against arbitrary UI is the configuration that can stall the input stack.
+
 ## Baseline for Spec 3
 
 The brief requires that the GUI never measurably perturb engine timing. The emit-side table is
