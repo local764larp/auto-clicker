@@ -1,17 +1,19 @@
 use crate::render::Elevation;
 
+/// Interaction state, orthogonal to focus. Focus is tracked separately by the
+/// `FocusRing` and drawn as an accent ring on top, because a widget can be
+/// focused *and* hovered/pressed at the same time — folding focus into this
+/// enum makes a focused control ignore the mouse.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum WidgetState {
     Idle,
     Hover,
     Pressed,
-    Focused,
     Disabled,
 }
 
 impl WidgetState {
-    /// Rendering elevation for this state. Focus is drawn as an accent ring on
-    /// top, so a focused control still reads as raised.
+    /// Rendering elevation for this state.
     pub fn elevation(self) -> Elevation {
         match self {
             WidgetState::Pressed => Elevation::Inset,
@@ -55,6 +57,11 @@ pub enum Action {
 /// Pure state transition shared by push-button-like widgets. Widgets with
 /// richer behaviour (slider drag, field editing) layer their value math
 /// (`value.rs`) on top of this and interpret `Action` themselves.
+///
+/// Focus events do not change interaction state (focus is orthogonal); they are
+/// accepted so the host can route them uniformly. Keyboard fire works from any
+/// non-disabled state because a keyboard-focused widget is usually `Idle`, not
+/// `Hover`.
 pub fn transition(state: WidgetState, ev: WidgetEvent) -> (WidgetState, Option<Action>) {
     use WidgetEvent::*;
     if state == WidgetState::Disabled {
@@ -63,18 +70,19 @@ pub fn transition(state: WidgetState, ev: WidgetEvent) -> (WidgetState, Option<A
     match (state, ev) {
         (WidgetState::Idle, PointerEnter) => (WidgetState::Hover, None),
         (WidgetState::Hover, PointerLeave) => (WidgetState::Idle, None),
-        (WidgetState::Hover, PointerDown { .. }) => (WidgetState::Pressed, None),
+        // A press registers even without a prior hover (a synthesized click, or
+        // focus-then-click, never sends PointerEnter first).
+        (WidgetState::Idle, PointerDown { .. }) | (WidgetState::Hover, PointerDown { .. }) => {
+            (WidgetState::Pressed, None)
+        }
         (WidgetState::Pressed, PointerUp { .. }) => (WidgetState::Hover, Some(Action::Fire)),
         // Drag-off: pointer left while pressed. A later release must not fire.
         (WidgetState::Pressed, PointerLeave) => (WidgetState::Idle, None),
-        (WidgetState::Idle, FocusGained) | (WidgetState::Hover, FocusGained) => {
-            (WidgetState::Focused, None)
-        }
-        (WidgetState::Focused, FocusLost) => (WidgetState::Idle, None),
-        (WidgetState::Focused, Key(KeyCode::Space))
-        | (WidgetState::Focused, Key(KeyCode::Enter)) => {
-            (WidgetState::Focused, Some(Action::Fire))
-        }
+        // Keyboard activation fires from any non-disabled state; focus is
+        // tracked externally, so a focused-but-unhovered widget is `Idle` here.
+        (_, Key(KeyCode::Space)) | (_, Key(KeyCode::Enter)) => (state, Some(Action::Fire)),
+        // Focus events are orthogonal to interaction state.
+        (_, FocusGained) | (_, FocusLost) => (state, None),
         _ => (state, None),
     }
 }
@@ -110,11 +118,24 @@ mod tests {
     }
 
     #[test]
-    fn space_and_enter_fire_when_focused() {
-        for k in [KeyCode::Space, KeyCode::Enter] {
-            let (s, a) = transition(WidgetState::Focused, WidgetEvent::Key(k));
-            assert_eq!(a, Some(Action::Fire));
-            assert_eq!(s, WidgetState::Focused);
+    fn click_without_prior_hover_still_fires() {
+        // A synthesized click, or a focus-then-click, sends PointerDown from
+        // Idle with no PointerEnter first. It must still press and fire.
+        let (s, a) = transition(WidgetState::Idle, WidgetEvent::PointerDown { x: 1.0, y: 1.0 });
+        assert_eq!(s, WidgetState::Pressed);
+        assert_eq!(a, None);
+        let (_, a) = transition(s, WidgetEvent::PointerUp { x: 1.0, y: 1.0 });
+        assert_eq!(a, Some(Action::Fire));
+    }
+
+    #[test]
+    fn space_and_enter_fire_from_any_non_disabled_state() {
+        for st in [WidgetState::Idle, WidgetState::Hover, WidgetState::Pressed] {
+            for k in [KeyCode::Space, KeyCode::Enter] {
+                let (s, a) = transition(st, WidgetEvent::Key(k));
+                assert_eq!(a, Some(Action::Fire), "{st:?} + {k:?} should fire");
+                assert_eq!(s, st, "keyboard fire must not change interaction state");
+            }
         }
     }
 
@@ -130,14 +151,15 @@ mod tests {
     }
 
     #[test]
-    fn focus_gained_and_lost() {
+    fn focus_events_do_not_change_interaction_state() {
+        // Focus is orthogonal, tracked by the FocusRing, not this enum.
         assert_eq!(
-            transition(WidgetState::Idle, WidgetEvent::FocusGained).0,
-            WidgetState::Focused
+            transition(WidgetState::Hover, WidgetEvent::FocusGained),
+            (WidgetState::Hover, None)
         );
         assert_eq!(
-            transition(WidgetState::Focused, WidgetEvent::FocusLost).0,
-            WidgetState::Idle
+            transition(WidgetState::Pressed, WidgetEvent::FocusLost),
+            (WidgetState::Pressed, None)
         );
     }
 
@@ -147,6 +169,5 @@ mod tests {
         assert_eq!(WidgetState::Disabled.elevation(), Elevation::Flat);
         assert_eq!(WidgetState::Idle.elevation(), Elevation::Raised);
         assert_eq!(WidgetState::Hover.elevation(), Elevation::Raised);
-        assert_eq!(WidgetState::Focused.elevation(), Elevation::Raised);
     }
 }

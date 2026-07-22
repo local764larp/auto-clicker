@@ -1,31 +1,47 @@
-//! Borderless window shell with a custom title bar.
+//! Borderless window shell + widget host.
 //!
 //! The window keeps `WS_OVERLAPPEDWINDOW` and strips the visual frame in
 //! `WM_NCCALCSIZE`, rather than using `WS_POPUP`. That distinction is the whole
 //! reason Snap Layouts, Aero Snap, and the window menu keep working — a popup
 //! loses all of them, which is the usual way a custom title bar quietly breaks
 //! window management.
+//!
+//! This file is the input adapter: it translates Win32 messages into
+//! `WidgetEvent`s, routes them to the hovered/focused widget's model, applies
+//! any resulting action to a config atomic via `App`, and repaints. The engine
+//! thread is never touched here except the one `clicks_emitted` read the timer
+//! does.
 
-use crate::render::color::{Palette, Rgb, Theme};
+use crate::app::App;
+use crate::render::color::{Rgb, Theme};
 use crate::render::device::{is_device_lost, DriverKind, RenderDevice};
-use crate::render::neumorph::{self, RenderedSurface};
-use crate::render::shadow::{clamp_radius, Elevation};
+use crate::render::shadow::clamp_radius;
 use crate::render::shell::{hit_test, HitRegion, ShellMetrics};
-use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
-use windows::Win32::Graphics::Direct2D::D2D1_ROUNDED_RECT;
+use crate::widget::text::TextStyle;
+use crate::widget::value;
+use crate::widget::{
+    layout, render as wrender, transition, KeyCode, WidgetEvent, WidgetId, ALL_WIDGETS,
+};
+use clicker_core::PositionMode;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
+use windows::Win32::Graphics::Direct2D::D2D1_ROUNDED_RECT;
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
     GetDpiForWindow, GetSystemMetricsForDpi, SetProcessDpiAwarenessContext,
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyState, ReleaseCapture, SetCapture, VK_SHIFT,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-/// Windows' reference DPI. Everything in the interface is authored in DIPs at
-/// this scale and multiplied at draw time.
 pub const BASE_DPI: f32 = 96.0;
+pub const WINDOW_RADIUS_DIP: f32 = 16.0;
+const READOUT_TIMER: usize = 1;
+const READOUT_INTERVAL_MS: u32 = 100;
 
 #[derive(Debug)]
 pub enum WindowError {
@@ -48,18 +64,12 @@ impl std::error::Error for WindowError {}
 pub struct WindowState {
     pub dpi_scale: f32,
     pub metrics: ShellMetrics,
-    pub palette: Palette,
-    pub width: i32,
-    pub height: i32,
+    pub theme: Theme,
     pub device: Option<RenderDevice>,
-    /// Temporary S2-5 demo surfaces, cached until size/DPI changes. Replaced by
-    /// real widgets in Spec 3.
-    pub demo: Vec<(RenderedSurface, f32, f32)>,
-    pub demo_key: (u32, u32, u32),
+    pub app: Option<App>,
+    pub hovered: Option<WidgetId>,
+    pub pressed: Option<WidgetId>,
 }
-
-/// Window corner radius in DIPs. Large and uniform; small radii read as flat.
-pub const WINDOW_RADIUS_DIP: f32 = 16.0;
 
 fn d2d_color(c: Rgb, a: f32) -> D2D1_COLOR_F {
     D2D1_COLOR_F { r: c.r, g: c.g, b: c.b, a }
@@ -70,12 +80,11 @@ impl WindowState {
         Self {
             dpi_scale: 1.0,
             metrics: ShellMetrics::default(),
-            palette: Palette::for_theme(theme),
-            width: 0,
-            height: 0,
+            theme,
             device: None,
-            demo: Vec::new(),
-            demo_key: (0, 0, 0),
+            app: None,
+            hovered: None,
+            pressed: None,
         }
     }
 
@@ -86,19 +95,16 @@ impl WindowState {
         };
         // SAFETY: `p.length` is set as the API requires and `p` is a valid
         // writable WINDOWPLACEMENT for the duration of the call.
-        unsafe { GetWindowPlacement(hwnd, &mut p).is_ok() && p.showCmd == SW_SHOWMAXIMIZED.0 as u32 }
+        unsafe {
+            GetWindowPlacement(hwnd, &mut p).is_ok() && p.showCmd == SW_SHOWMAXIMIZED.0 as u32
+        }
     }
 }
 
 /// Set process DPI awareness. Must run before any window exists.
-///
-/// Per-Monitor v2 is what makes non-client areas, dialogs, and scroll bars
-/// scale correctly on mixed-DPI setups. Without it the shell renders blurry on
-/// any monitor that is not the primary.
 pub fn init_dpi_awareness() {
-    // SAFETY: takes an opaque context handle constant and no pointers. Failure
-    // only means an awareness mode was already set for this process, which is
-    // not a memory-safety concern.
+    // SAFETY: takes an opaque context constant and no pointers; a failure only
+    // means an awareness mode was already set, which is not a safety concern.
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
@@ -107,9 +113,9 @@ pub fn init_dpi_awareness() {
 const CLASS_NAME: &str = "ClickerNeumorphWindow\0";
 
 pub fn create_main_window(theme: Theme) -> Result<HWND, WindowError> {
-    // SAFETY: the class name is a NUL-terminated UTF-16 buffer that outlives
-    // both calls; the state box is handed to the window in WM_NCCREATE and
-    // reclaimed in WM_NCDESTROY, so it is owned exactly once.
+    // SAFETY: the class name is NUL-terminated UTF-16 outliving both calls; the
+    // state box is handed to the window in WM_NCCREATE and reclaimed in
+    // WM_NCDESTROY, so it is owned exactly once.
     unsafe {
         let hinst = GetModuleHandleW(None).map_err(|_| WindowError::Creation(0))?;
         let class: Vec<u16> = CLASS_NAME.encode_utf16().collect();
@@ -136,12 +142,11 @@ pub fn create_main_window(theme: Theme) -> Result<HWND, WindowError> {
             WINDOW_EX_STYLE(0),
             PCWSTR(class.as_ptr()),
             PCWSTR(title.as_ptr()),
-            // Overlapped, not popup: this is what preserves Snap Layouts.
             WS_OVERLAPPEDWINDOW,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            520,
-            680,
+            420,
+            560,
             None,
             None,
             Some(hinst.into()),
@@ -157,8 +162,6 @@ pub fn show(hwnd: HWND) {
     // SAFETY: `hwnd` is a live window created above.
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOW);
-        // Force a fresh WM_NCCALCSIZE so the frame strip applies immediately
-        // rather than on the first user-initiated resize.
         let _ = SetWindowPos(
             hwnd,
             None,
@@ -173,8 +176,8 @@ pub fn show(hwnd: HWND) {
 
 pub fn run_message_loop() -> i32 {
     let mut msg = MSG::default();
-    // SAFETY: `msg` is a valid writable MSG for each call; a null HWND
-    // retrieves messages for every window on this thread.
+    // SAFETY: `msg` is a valid writable MSG for each call; a null HWND retrieves
+    // messages for every window on this thread.
     unsafe {
         while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
             let _ = TranslateMessage(&msg);
@@ -185,16 +188,54 @@ pub fn run_message_loop() -> i32 {
 }
 
 fn state_ptr(hwnd: HWND) -> *mut WindowState {
-    // SAFETY: GWLP_USERDATA holds either null or the pointer stored in
-    // WM_NCCREATE. Callers must null-check.
+    // SAFETY: GWLP_USERDATA holds null or the pointer stored in WM_NCCREATE.
     unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowState }
+}
+
+/// Client size in DIPs.
+fn client_dip(hwnd: HWND, scale: f32) -> (f32, f32) {
+    let mut rc = RECT::default();
+    // SAFETY: `rc` is valid and writable; `hwnd` is live.
+    unsafe {
+        let _ = GetClientRect(hwnd, &mut rc);
+    }
+    ((rc.right - rc.left) as f32 / scale, (rc.bottom - rc.top) as f32 / scale)
+}
+
+fn invalidate_all(hwnd: HWND) {
+    // SAFETY: `hwnd` is live; a null rect invalidates the whole client area.
+    unsafe {
+        let _ = InvalidateRect(Some(hwnd), None, false);
+    }
+}
+
+/// Feed one event to a widget's model and apply the resulting action.
+fn dispatch(hwnd: HWND, st: &mut WindowState, id: WidgetId, ev: WidgetEvent) {
+    let Some(app) = st.app.as_mut() else { return };
+    let (next, action) = transition(app.state(id), ev);
+    app.set_state(id, next);
+    if action == Some(crate::widget::Action::Fire) {
+        match id {
+            WidgetId::StartStop => app.toggle_running(),
+            WidgetId::ModeToggle => {
+                let m = if app.mode == PositionMode::FollowCursor {
+                    PositionMode::FixedPoint
+                } else {
+                    PositionMode::FollowCursor
+                };
+                app.set_mode(m);
+            }
+            _ => {}
+        }
+    }
+    invalidate_all(hwnd);
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     match msg {
         WM_NCCREATE => {
-            // SAFETY: lParam points to the CREATESTRUCTW the system built from
-            // our CreateWindowExW call; lpCreateParams is the Box we leaked.
+            // SAFETY: lParam points to the CREATESTRUCTW the system built; its
+            // lpCreateParams is the Box we leaked in create_main_window.
             unsafe {
                 let cs = l.0 as *const CREATESTRUCTW;
                 if !cs.is_null() {
@@ -214,29 +255,34 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                 // SAFETY: `p` is the state installed in WM_NCCREATE.
                 let st = unsafe { &mut *p };
                 let mut rc = RECT::default();
-                // SAFETY: `rc` is a valid writable RECT; `hwnd` is live.
+                // SAFETY: `rc` is valid and writable; `hwnd` is live.
                 unsafe {
                     let _ = GetClientRect(hwnd, &mut rc);
                 }
-                let size = ((rc.right - rc.left).max(1) as u32, (rc.bottom - rc.top).max(1) as u32);
+                let size =
+                    ((rc.right - rc.left).max(1) as u32, (rc.bottom - rc.top).max(1) as u32);
                 match RenderDevice::new(hwnd, DriverKind::Hardware, size, st.dpi_scale) {
                     Ok(d) => st.device = Some(d),
                     Err(e) => eprintln!("device creation failed: {e}"),
+                }
+                match App::new(st.dpi_scale, st.theme) {
+                    Ok(a) => st.app = Some(a),
+                    Err(e) => eprintln!("engine failed to start: {e}"),
+                }
+                // SAFETY: `hwnd` is live; the readout timer drives the CPS sample.
+                unsafe {
+                    let _ = SetTimer(Some(hwnd), READOUT_TIMER, READOUT_INTERVAL_MS, None);
                 }
             }
             LRESULT(0)
         }
 
-        // Strip the visual frame while keeping the window overlapped.
         WM_NCCALCSIZE if w.0 != 0 => {
             // SAFETY: with wParam != 0, lParam points to an NCCALCSIZE_PARAMS
             // whose rgrc[0] is the proposed client rect.
             unsafe {
                 let params = l.0 as *mut NCCALCSIZE_PARAMS;
                 if !params.is_null() && WindowState::is_maximized(hwnd) {
-                    // A maximized borderless window would otherwise cover the
-                    // taskbar and bleed past the monitor edge. Inset by the
-                    // frame the system would have drawn.
                     let dpi = GetDpiForWindow(hwnd);
                     let cx = GetSystemMetricsForDpi(SM_CXFRAME, dpi)
                         + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
@@ -249,7 +295,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                     r.bottom -= cy;
                 }
             }
-            // Zero client-area adjustment: the client fills the whole window.
             LRESULT(0)
         }
 
@@ -259,38 +304,28 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                 // SAFETY: forwarding with the arguments received.
                 return unsafe { DefWindowProcW(hwnd, msg, w, l) };
             }
-            // SAFETY: `p` is the state installed in WM_NCCREATE and lives
-            // until WM_NCDESTROY.
+            // SAFETY: `p` is live state until WM_NCDESTROY.
             let st = unsafe { &*p };
-
             let screen_x = (l.0 & 0xFFFF) as i16 as i32;
             let screen_y = ((l.0 >> 16) & 0xFFFF) as i16 as i32;
             let mut rc = RECT::default();
-            // SAFETY: `rc` is a valid writable RECT; `hwnd` is live.
+            // SAFETY: `rc` is valid and writable; `hwnd` is live.
             unsafe {
                 let _ = GetWindowRect(hwnd, &mut rc);
             }
-            let x = (screen_x - rc.left) as f32;
-            let y = (screen_y - rc.top) as f32;
-            let w_px = (rc.right - rc.left) as f32;
-            let h_px = (rc.bottom - rc.top) as f32;
-
             let region = hit_test(
-                x,
-                y,
-                w_px,
-                h_px,
+                (screen_x - rc.left) as f32,
+                (screen_y - rc.top) as f32,
+                (rc.right - rc.left) as f32,
+                (rc.bottom - rc.top) as f32,
                 st.dpi_scale,
                 &st.metrics,
                 WindowState::is_maximized(hwnd),
             );
-
             LRESULT(match region {
                 HitRegion::Client => HTCLIENT as isize,
                 HitRegion::Caption => HTCAPTION as isize,
                 HitRegion::MinButton => HTMINBUTTON as isize,
-                // Snap Layouts attaches to HTMAXBUTTON; reporting HTCLIENT
-                // here is what kills the flyout.
                 HitRegion::MaxButton => HTMAXBUTTON as isize,
                 HitRegion::CloseButton => HTCLOSE as isize,
                 HitRegion::Left => HTLEFT as isize,
@@ -304,17 +339,141 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             })
         }
 
+        WM_MOUSEMOVE => {
+            let p = state_ptr(hwnd);
+            if !p.is_null() {
+                // SAFETY: `p` is live state owned by this window.
+                let st = unsafe { &mut *p };
+                let scale = st.dpi_scale;
+                let px = (l.0 & 0xFFFF) as i16 as f32 / scale;
+                let py = ((l.0 >> 16) & 0xFFFF) as i16 as f32 / scale;
+                let (cw, ch) = client_dip(hwnd, scale);
+                let hit = layout::layout(cw, ch).hit(px, py);
+                if hit != st.hovered {
+                    if let Some(old) = st.hovered {
+                        dispatch(hwnd, st, old, WidgetEvent::PointerLeave);
+                    }
+                    if let Some(new) = hit {
+                        dispatch(hwnd, st, new, WidgetEvent::PointerEnter);
+                    }
+                    st.hovered = hit;
+                }
+                // Live slider drag while the button is held.
+                if st.pressed == Some(WidgetId::RateSlider) {
+                    drag_slider(hwnd, st, px, py);
+                }
+            }
+            LRESULT(0)
+        }
+
+        WM_LBUTTONDOWN => {
+            let p = state_ptr(hwnd);
+            if !p.is_null() {
+                // SAFETY: `p` is live state.
+                let st = unsafe { &mut *p };
+                let scale = st.dpi_scale;
+                let px = (l.0 & 0xFFFF) as i16 as f32 / scale;
+                let py = ((l.0 >> 16) & 0xFFFF) as i16 as f32 / scale;
+                let (cw, ch) = client_dip(hwnd, scale);
+                let rects = layout::layout(cw, ch);
+                if let Some(id) = rects.hit(px, py) {
+                    // SAFETY: capture is released on WM_LBUTTONUP.
+                    unsafe {
+                        SetCapture(hwnd);
+                    }
+                    st.pressed = Some(id);
+                    focus_widget(hwnd, st, id);
+                    let (lx, ly) = rects.get(id).local(px, py);
+                    dispatch(hwnd, st, id, WidgetEvent::PointerDown { x: lx, y: ly });
+                    if id == WidgetId::RateSlider {
+                        drag_slider(hwnd, st, px, py);
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+
+        WM_LBUTTONUP => {
+            let p = state_ptr(hwnd);
+            if !p.is_null() {
+                // SAFETY: `p` is live state.
+                let st = unsafe { &mut *p };
+                // SAFETY: releasing the capture taken on button-down.
+                unsafe {
+                    let _ = ReleaseCapture();
+                }
+                if let Some(id) = st.pressed.take() {
+                    let scale = st.dpi_scale;
+                    let px = (l.0 & 0xFFFF) as i16 as f32 / scale;
+                    let py = ((l.0 >> 16) & 0xFFFF) as i16 as f32 / scale;
+                    let (cw, ch) = client_dip(hwnd, scale);
+                    let (lx, ly) = layout::layout(cw, ch).get(id).local(px, py);
+                    dispatch(hwnd, st, id, WidgetEvent::PointerUp { x: lx, y: ly });
+                }
+            }
+            LRESULT(0)
+        }
+
+        WM_KEYDOWN => {
+            let p = state_ptr(hwnd);
+            if !p.is_null() {
+                // SAFETY: `p` is live state.
+                let st = unsafe { &mut *p };
+                let vk = w.0 as u32;
+                match vk {
+                    0x09 => key_tab(hwnd, st),                       // VK_TAB
+                    0x54 => key_theme(hwnd, st),                     // 'T'
+                    0x25 | 0x27 => key_arrow(hwnd, st, vk == 0x27),  // Left/Right
+                    0x20 | 0x0D => key_fire(hwnd, st),               // Space/Enter
+                    _ => {}
+                }
+            }
+            LRESULT(0)
+        }
+
+        WM_TIMER if w.0 == READOUT_TIMER => {
+            let p = state_ptr(hwnd);
+            if !p.is_null() {
+                // SAFETY: `p` is live state. One Relaxed load of clicks_emitted;
+                // invalidate only the readout rect so nothing else repaints.
+                let st = unsafe { &mut *p };
+                if let Some(app) = st.app.as_mut() {
+                    let before = app.last_cps;
+                    let now = app.sample_cps(READOUT_INTERVAL_MS as f64 / 1000.0);
+                    if now != before {
+                        let (cw, ch) = client_dip(hwnd, st.dpi_scale);
+                        let r = layout::layout(cw, ch).get(WidgetId::CpsReadout);
+                        let scale = st.dpi_scale;
+                        let rc = RECT {
+                            left: (r.x * scale) as i32,
+                            top: (r.y * scale) as i32,
+                            right: ((r.x + r.w) * scale) as i32,
+                            bottom: ((r.y + r.h) * scale) as i32,
+                        };
+                        // SAFETY: `hwnd` is live; `rc` is a valid rect.
+                        unsafe {
+                            let _ = InvalidateRect(Some(hwnd), Some(&rc), false);
+                        }
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+
         WM_DPICHANGED => {
             let p = state_ptr(hwnd);
             if !p.is_null() {
-                // SAFETY: `p` is live state; the new DPI is in the low word.
+                // SAFETY: `p` is live state; new DPI in the low word.
                 unsafe {
-                    (*p).dpi_scale = (w.0 & 0xFFFF) as f32 / BASE_DPI;
+                    let scale = (w.0 & 0xFFFF) as f32 / BASE_DPI;
+                    (*p).dpi_scale = scale;
+                    if let Some(app) = (*p).app.as_mut() {
+                        app.dpi_scale = scale;
+                        app.cache.clear();
+                    }
                 }
             }
-            // SAFETY: lParam points to the system's suggested rect for the new
-            // monitor. Honouring it is required, not optional — ignoring it
-            // leaves the window mis-sized after a monitor change.
+            // SAFETY: lParam is the system's suggested rect for the new monitor.
             unsafe {
                 let sug = l.0 as *const RECT;
                 if !sug.is_null() {
@@ -337,17 +496,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
         WM_SIZE => {
             let p = state_ptr(hwnd);
             if !p.is_null() {
-                // SAFETY: `p` is live state; size is packed into lParam.
+                // SAFETY: `p` is live state; size packed into lParam.
                 unsafe {
-                    (*p).width = (l.0 & 0xFFFF) as i32;
-                    (*p).height = ((l.0 >> 16) & 0xFFFF) as i32;
-                    let (cw, ch) = ((*p).width.max(1) as u32, (*p).height.max(1) as u32);
+                    let (cw, ch) = ((l.0 & 0xFFFF) as u32, ((l.0 >> 16) & 0xFFFF) as u32);
                     if let Some(dev) = (*p).device.as_mut() {
-                        if let Err(e) = dev.resize(cw, ch) {
+                        if let Err(e) = dev.resize(cw.max(1), ch.max(1)) {
                             if is_device_lost(&e.0) {
                                 let _ = dev.recreate(hwnd);
                             }
                         }
+                    }
+                    if let Some(app) = (*p).app.as_mut() {
+                        app.cache.clear(); // sizes are DIP-relative to client width
                     }
                 }
             }
@@ -365,8 +525,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                 // SAFETY: `p` is live state owned by this window.
                 let st = unsafe { &mut *p };
                 if let Err(e) = paint(hwnd, st) {
-                    // A lost device is expected after driver updates and GPU
-                    // resets; rebuild rather than leaving a black window.
                     if is_device_lost(&e.0) {
                         if let Some(dev) = st.device.as_mut() {
                             let _ = dev.recreate(hwnd);
@@ -386,8 +544,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
         WM_NCDESTROY => {
             let p = state_ptr(hwnd);
             if !p.is_null() {
-                // SAFETY: reclaims the Box leaked in create_main_window,
-                // exactly once, after which the pointer is cleared.
+                // SAFETY: reclaims the Box leaked in create_main_window, once.
                 unsafe {
                     drop(Box::from_raw(p));
                     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -397,28 +554,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             unsafe { DefWindowProcW(hwnd, msg, w, l) }
         }
 
-        // Playground affordance: T toggles the theme so both bases can be
-        // judged live; the neumorphic illusion has to hold in each.
-        WM_KEYDOWN if w.0 as u32 == 0x54 => {
-            let p = state_ptr(hwnd);
-            if !p.is_null() {
-                // SAFETY: `p` is live state owned by this window.
-                unsafe {
-                    let next = match (*p).palette.theme {
-                        Theme::Light => Theme::Dark,
-                        Theme::Dark => Theme::Light,
-                    };
-                    (*p).palette = Palette::for_theme(next);
-                    (*p).demo.clear(); // force surfaces to re-render for the new palette
-                    let _ = InvalidateRect(Some(hwnd), None, false);
-                }
-            }
-            LRESULT(0)
-        }
-
         WM_DESTROY => {
             // SAFETY: no pointer arguments.
             unsafe {
+                let _ = KillTimer(Some(hwnd), READOUT_TIMER);
                 PostQuitMessage(0);
             }
             LRESULT(0)
@@ -429,66 +568,105 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
     }
 }
 
-/// Draw one frame.
-///
-/// Clears to fully transparent and then fills a rounded rect with the base
-/// colour. The transparent margin is the proof that DirectComposition is doing
-/// its job: on a plain HWND swapchain those corners would be black.
-fn paint(hwnd: HWND, st: &mut WindowState) -> Result<(), crate::render::device::RenderError> {
-    let Some(dev) = st.device.as_mut() else { return Ok(()) };
-
-    let mut rc = RECT::default();
-    // SAFETY: `rc` is a valid writable RECT; `hwnd` is live.
-    unsafe {
-        let _ = GetClientRect(hwnd, &mut rc);
-    }
+/// Slider drag: map the pointer x to a CPS and write it.
+fn drag_slider(hwnd: HWND, st: &mut WindowState, px: f32, _py: f32) {
     let scale = st.dpi_scale;
-    let w_dip = (rc.right - rc.left) as f32 / scale;
-    let h_dip = (rc.bottom - rc.top) as f32 / scale;
+    let (cw, ch) = client_dip(hwnd, scale);
+    let r = layout::layout(cw, ch).get(WidgetId::RateSlider);
+    let gmin = r.x + wrender::SLIDER_THUMB / 2.0;
+    let gmax = r.x + r.w - wrender::SLIDER_THUMB / 2.0;
+    let cps = value::slider_value(px, gmin, gmax, value::CPS_MIN, value::CPS_SLIDER_MAX);
+    if let Some(app) = st.app.as_mut() {
+        app.set_cps(cps);
+    }
+    invalidate_all(hwnd);
+}
 
-    // A maximized window sits flush against the screen edges, so rounding it
-    // would leave transparent notches over the desktop.
+fn focus_widget(hwnd: HWND, st: &mut WindowState, id: WidgetId) {
+    // Focus is orthogonal to interaction state: only the ring moves.
+    if let Some(app) = st.app.as_mut() {
+        app.focus.focus(id);
+    }
+    invalidate_all(hwnd);
+}
+
+fn key_tab(hwnd: HWND, st: &mut WindowState) {
+    // SAFETY: GetKeyState takes a plain VK and returns a SHORT.
+    let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
+    if let Some(app) = st.app.as_mut() {
+        if shift {
+            app.focus.prev();
+        } else {
+            app.focus.next();
+        }
+    }
+    invalidate_all(hwnd);
+}
+
+fn key_theme(hwnd: HWND, st: &mut WindowState) {
+    if let Some(app) = st.app.as_mut() {
+        app.toggle_theme();
+        st.theme = app.palette.theme;
+    }
+    invalidate_all(hwnd);
+}
+
+fn key_arrow(hwnd: HWND, st: &mut WindowState, right: bool) {
+    if let Some(app) = st.app.as_mut() {
+        if app.focus.focused() == Some(WidgetId::RateSlider) {
+            let step = 10i64;
+            let next = (app.cps as i64 + if right { step } else { -step })
+                .clamp(value::CPS_MIN as i64, value::CPS_SLIDER_MAX as i64);
+            app.set_cps(next as u32);
+            invalidate_all(hwnd);
+        }
+    }
+}
+
+fn key_fire(hwnd: HWND, st: &mut WindowState) {
+    if let Some(app) = st.app.as_mut() {
+        if let Some(id) = app.focus.focused() {
+            dispatch(hwnd, st, id, WidgetEvent::Key(KeyCode::Space));
+        }
+    }
+}
+
+/// Draw one frame: base surface, then every widget with its focus ring and text.
+fn paint(hwnd: HWND, st: &mut WindowState) -> Result<(), crate::render::device::RenderError> {
+    let scale = st.dpi_scale;
+    let (w_dip, h_dip) = client_dip(hwnd, scale);
     let radius = if WindowState::is_maximized(hwnd) {
         0.0
     } else {
         clamp_radius(WINDOW_RADIUS_DIP, w_dip, h_dip)
     };
 
-    // Refresh the demo surfaces if size or DPI changed. This runs OUTSIDE the
-    // main BeginDraw, because render_surface opens its own draw sessions — the
-    // caching layer the brief calls for, in miniature.
-    let key = (rc.right as u32, rc.bottom as u32, (scale * 100.0) as u32);
-    if key != st.demo_key || st.demo.is_empty() {
-        st.demo.clear();
-        // One column per elevation so the three read against each other:
-        // raised (extruded), inset (pressed), flat. Positions are surface-rect
-        // top-lefts, in DIPs.
-        let specs = [
-            (Elevation::Raised, 130.0f32, 90.0f32, 70.0f32, 70.0f32),
-            (Elevation::Inset, 130.0, 90.0, 70.0, 210.0),
-            (Elevation::Flat, 130.0, 90.0, 70.0, 350.0),
-            (Elevation::Raised, 130.0, 60.0, 270.0, 70.0),
-            (Elevation::Inset, 130.0, 60.0, 270.0, 210.0),
-        ];
-        for (elev, sw, sh, sx, sy) in specs {
-            if let Ok(surf) =
-                neumorph::render_surface(&dev.ctx, sw, sh, 20.0, elev, &st.palette, scale)
-            {
-                st.demo.push((surf, sx, sy));
-            }
-        }
-        st.demo_key = key;
+    // Disjoint field borrows: device and app are separate fields.
+    let (Some(dev), Some(app)) = (st.device.as_ref(), st.app.as_mut()) else {
+        return Ok(());
+    };
+    let rects = layout::layout(w_dip, h_dip);
+    let fixed = app.mode == PositionMode::FixedPoint;
+
+    // Compute every widget's surfaces once, shared by the prepare and blit
+    // passes so they never disagree.
+    let mut specs: Vec<(WidgetId, layout::Rect, Vec<wrender::SurfaceSpec>)> = Vec::new();
+    for id in ALL_WIDGETS {
+        let r = rects.get(id);
+        let s = wrender::surface_specs(id, r, app.state(id), app.cps, fixed);
+        specs.push((id, r, s));
     }
+
+    // Prepare pass: render any missing surfaces OUTSIDE begin_draw.
+    let prep: Vec<(layout::Rect, Vec<wrender::SurfaceSpec>)> =
+        specs.iter().map(|(_, r, s)| (*r, s.clone())).collect();
+    wrender::prepare(&mut app.cache, &dev.ctx, &prep, &app.palette, scale)?;
 
     dev.begin_draw();
     // SAFETY: the context has a bound target between begin_draw and end_draw.
     unsafe {
         dev.ctx.Clear(Some(&d2d_color(Rgb::new(0.0, 0.0, 0.0), 0.0)));
-
-        let brush = dev
-            .ctx
-            .CreateSolidColorBrush(&d2d_color(st.palette.base, 1.0), None)?;
-
+        let brush = dev.ctx.CreateSolidColorBrush(&d2d_color(app.palette.base, 1.0), None)?;
         let rr = D2D1_ROUNDED_RECT {
             rect: D2D_RECT_F { left: 0.0, top: 0.0, right: w_dip, bottom: h_dip },
             radiusX: radius,
@@ -496,12 +674,73 @@ fn paint(hwnd: HWND, st: &mut WindowState) -> Result<(), crate::render::device::
         };
         dev.ctx.FillRoundedRectangle(&rr, &brush);
 
-        for (surf, x, y) in &st.demo {
-            // SAFETY: inside begin_draw/end_draw, on a live context.
-            neumorph::draw_surface(&dev.ctx, surf, *x, *y);
+        let focused = app.focus.focused();
+        for (id, r, list) in &specs {
+            wrender::blit_specs(&mut app.cache, &dev.ctx, *r, list, &app.palette, scale)?;
+
+            // Text / accent overlays.
+            match id {
+                WidgetId::StartStop => {
+                    let label = if app.is_running() { "Stop" } else { "Start" };
+                    let color = if app.is_running() { app.palette.accent } else { app.palette.text_primary };
+                    let _ = crate::widget::text::draw_text(
+                        &dev.ctx,
+                        label,
+                        rect_f(*r),
+                        app.text.format(TextStyle::Body),
+                        color,
+                    );
+                }
+                WidgetId::CpsReadout => {
+                    let big = D2D_RECT_F {
+                        left: r.x,
+                        top: r.y + 8.0,
+                        right: r.x + r.w,
+                        bottom: r.y + r.h - 24.0,
+                    };
+                    let _ = crate::widget::text::draw_text(
+                        &dev.ctx,
+                        &app.last_cps.to_string(),
+                        big,
+                        app.text.format(TextStyle::Large),
+                        app.palette.text_primary,
+                    );
+                    let cap = D2D_RECT_F {
+                        left: r.x,
+                        top: r.y + r.h - 28.0,
+                        right: r.x + r.w,
+                        bottom: r.y + r.h,
+                    };
+                    let _ = crate::widget::text::draw_text(
+                        &dev.ctx,
+                        "CLICKS / SEC",
+                        cap,
+                        app.text.format(TextStyle::Body),
+                        app.palette.text_secondary,
+                    );
+                }
+                WidgetId::IntervalField => {
+                    let _ = crate::widget::text::draw_text(
+                        &dev.ctx,
+                        &format!("{} CPS", app.field_text),
+                        rect_f(*r),
+                        app.text.format(TextStyle::Body),
+                        app.palette.text_primary,
+                    );
+                }
+                _ => {}
+            }
+
+            if focused == Some(*id) {
+                wrender::accent_ring(&dev.ctx, *r, &app.palette);
+            }
         }
     }
     dev.end_draw()?;
     dev.present()?;
     Ok(())
+}
+
+fn rect_f(r: layout::Rect) -> D2D_RECT_F {
+    D2D_RECT_F { left: r.x, top: r.y, right: r.x + r.w, bottom: r.y + r.h }
 }
