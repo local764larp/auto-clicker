@@ -13,6 +13,7 @@ name = "clicker-gui"
 path = "src/main.rs"
 
 [dependencies]
+clicker-core = { version = "0.1.0", path = "../clicker-core" }
 windows-numerics = "0.3"
 
 [target."cfg(windows)".dependencies]

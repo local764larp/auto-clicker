@@ -5,6 +5,7 @@
 
 pub mod render;
 pub mod widget;
+pub mod app;
 
 #[cfg(windows)]
 pub mod window;
