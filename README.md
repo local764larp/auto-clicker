@@ -4,8 +4,22 @@ A Windows auto clicker built to reach the genuine user-mode throughput ceiling, 
 hand-rendered neumorphic Direct2D interface. Written in Rust against raw Win32 — no GUI
 framework.
 
-**Status:** the click engine and its measurement harness are complete and merged. The interface
-is in progress.
+**Status:** complete. Engine, measurement harness, neumorphic interface, global hotkeys, and
+profile persistence are all built, tested, and merged.
+
+## Features
+
+- **Click rate 1–2,000 CPS** on a slider (the measured 100%-fidelity range), or up to a 4,000 hard
+  cap via the numeric field; follow-cursor or fixed-point targeting.
+- **Global toggle hotkey** (default F6) and **hold-to-click** (a held key clicks only while down),
+  both working when the window is unfocused, and neither using a low-level hook.
+- **Emergency stop (F8)** on a dedicated thread that clears the run flag directly — independent of
+  the interface being responsive.
+- **Live CPS readout** sampled every 100 ms without touching the engine's timing.
+- **Settings persist** across restarts (`%APPDATA%\AutoClicker\profiles.json`, written
+  atomically); a corrupt or hand-edited file falls back to defaults rather than crashing.
+- **Neumorphic Direct2D interface** with light/dark themes, per-monitor DPI, and true rounded-
+  corner transparency via DirectComposition — no GUI framework, hand-rendered.
 
 ## Measured performance
 
@@ -36,6 +50,20 @@ Measured inside the engine, on the same clock the scheduler uses:
 Sub-microsecond at 50 CPS across 249 samples; 0.2% off target at p99 at 1,000 CPS. The scheduler
 advances an absolute deadline by the interval rather than computing `now + interval`, so
 per-iteration overhead cannot accumulate into drift.
+
+### The interface does not perturb the engine
+
+The mission's hard rule is that the GUI must never measurably affect engine timing. Measured with
+the engine alone versus the interface repainting continuously at 60 Hz beside it:
+
+| Rate | Engine alone (p99) | Engine + GUI (p99) |
+|---|---|---|
+| 1000 CPS | 1000.1 µs | 1000.1 µs |
+| 2000 CPS | 500.1 µs | 500.1 µs |
+
+Sub-microsecond difference at every throttled rate. The architecture — a pinned `TIME_CRITICAL`
+engine reading atomics, a render-on-demand interface, and no lock, channel, or per-click path
+between them — delivers what it promised.
 
 ### Two findings worth stating
 
@@ -75,10 +103,18 @@ targets, which is what keeps it testable.
 ## Layout
 
 ```
-crates/clicker-core/   engine, timing, sinks — no GUI dependencies
-crates/clicker-gui/    Win32 + Direct2D interface (in progress)
+crates/clicker-core/   engine, timing, sinks, profiles — no GUI dependencies
+crates/clicker-gui/    Win32 + Direct2D interface, widgets, hotkeys
 bench/                 measurement harness and recorded results
 docs/superpowers/      design specs and implementation plans
+```
+
+The interface's widget logic (state machines, value math, focus, layout) and the profile format
+are platform-neutral and unit-tested; only rendering and Win32 plumbing are Windows-specific.
+Running the app:
+
+```
+cargo run -p clicker-gui --release
 ```
 
 ## Building

@@ -8,4 +8,6 @@ pub mod widget;
 pub mod app;
 
 #[cfg(windows)]
+pub mod hotkey;
+#[cfg(windows)]
 pub mod window;

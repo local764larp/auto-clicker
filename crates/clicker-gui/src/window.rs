@@ -13,6 +13,7 @@
 //! does.
 
 use crate::app::App;
+use crate::hotkey::{register_raw_keyboard, register_toggle, set_high_priority, unregister_toggle};
 use crate::render::color::{Rgb, Theme};
 use crate::render::device::{is_device_lost, DriverKind, RenderDevice};
 use crate::render::shadow::clamp_radius;
@@ -268,6 +269,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                 let render_only = match App::new(st.dpi_scale, st.theme) {
                     Ok(a) => {
                         let ro = !a.has_engine();
+                        // Register global hotkeys and apply persisted priority.
+                        if !register_toggle(hwnd, a.toggle_vk) {
+                            eprintln!(
+                                "note: could not register the toggle hotkey (0x{:X}); it may be \
+                                 owned by another app",
+                                a.toggle_vk
+                            );
+                        }
+                        if a.hold_vk != 0 && !register_raw_keyboard(hwnd) {
+                            eprintln!("note: could not register raw input for hold-to-click");
+                        }
+                        set_high_priority(a.high_priority);
                         st.app = Some(a);
                         ro
                     }
@@ -476,6 +489,39 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             LRESULT(0)
         }
 
+        WM_HOTKEY if w.0 as i32 == crate::hotkey::TOGGLE_HOTKEY_ID => {
+            let p = state_ptr(hwnd);
+            if !p.is_null() {
+                // SAFETY: `p` is live state. The toggle hotkey starts/stops the
+                // engine directly, from any foreground window.
+                let st = unsafe { &mut *p };
+                if let Some(app) = st.app.as_mut() {
+                    app.toggle_running();
+                }
+                invalidate_all(hwnd);
+            }
+            LRESULT(0)
+        }
+
+        WM_INPUT => {
+            let p = state_ptr(hwnd);
+            if !p.is_null() {
+                // SAFETY: `p` is live state.
+                let st = unsafe { &mut *p };
+                if let Some((vk, pressed)) = crate::hotkey::parse_raw_key(l) {
+                    if let Some(app) = st.app.as_mut() {
+                        if app.hold_vk != 0 && vk == app.hold_vk {
+                            // Hold-to-click: run only while the trigger is down.
+                            app.set_running(pressed);
+                            invalidate_all(hwnd);
+                        }
+                    }
+                }
+            }
+            // SAFETY: raw input requires DefWindowProc to clean up the buffer.
+            unsafe { DefWindowProcW(hwnd, msg, w, l) }
+        }
+
         WM_DPICHANGED => {
             let p = state_ptr(hwnd);
             if !p.is_null() {
@@ -571,6 +617,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
         }
 
         WM_DESTROY => {
+            let p = state_ptr(hwnd);
+            if !p.is_null() {
+                // SAFETY: `p` is live state. Persist settings before teardown;
+                // save is best-effort and a no-op in render-only mode.
+                let st = unsafe { &*p };
+                if let Some(app) = st.app.as_ref() {
+                    app.save();
+                }
+            }
+            unregister_toggle(hwnd);
             // SAFETY: no pointer arguments.
             unsafe {
                 let _ = KillTimer(Some(hwnd), READOUT_TIMER);
