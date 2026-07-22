@@ -4,6 +4,7 @@
 //! target. Everything that touches Direct2D is `#[cfg(windows)]`.
 
 pub mod render;
+pub mod widget;
 
 #[cfg(windows)]
 pub mod window;
