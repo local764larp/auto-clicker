@@ -112,6 +112,25 @@ function applyRand() { cfg.randomize_pct = randOn.checked ? +rand.value : 0; ran
 randOn.addEventListener("change", () => { prefs.randOn = randOn.checked; savePrefs(); applyRand(); });
 rand.addEventListener("input", () => { randVal.textContent = rand.value + "%"; applyRand(); });
 
+// ---------- Zones ----------
+function pushZones() {
+  const vals = (sel) => [...$$(sel + " input")].map((i) => parseInt(i.value) || 0);
+  const cornerVals = vals("#z-corner-quad");
+  const edgeVals = vals("#z-edge-quad");
+  const z = {
+    corner: $("#z-corner").checked,
+    corner_px: cornerVals.length ? Math.max(...cornerVals) : 0,
+    edge: $("#z-edge").checked,
+    edge_px: edgeVals.length ? Math.max(...edgeVals) : 0,
+    custom: $("#z-custom").checked,
+    rects: [],
+  };
+  prefs.zones = z; savePrefs();
+  invoke("set_zones", { zones: z }).catch(() => {});
+}
+["z-corner", "z-edge", "z-custom"].forEach((id) => $("#" + id).addEventListener("change", pushZones));
+$$('.view[data-view="zones"] input[type=number]').forEach((i) => i.addEventListener("input", pushZones));
+
 // ---------- Behavior ----------
 $("#b-ontop").addEventListener("change", (e) => { win.setAlwaysOnTop(e.target.checked); $("#pin").classList.toggle("on", e.target.checked); prefs.ontop = e.target.checked; savePrefs(); });
 $("#b-extended").addEventListener("change", (e) => { prefs.extended = e.target.checked; savePrefs(); sCps.max = maxCps(); aCps.max = maxCps(); });
@@ -235,6 +254,13 @@ async function init() {
   syncUIFromCfg();
   await pushConfig();
   refreshPresets();
+  // Restore zone toggles/sizes and push to the backend monitor.
+  if (prefs.zones) {
+    $("#z-corner").checked = !!prefs.zones.corner;
+    $("#z-edge").checked = !!prefs.zones.edge;
+    $("#z-custom").checked = !!prefs.zones.custom;
+  }
+  pushZones();
   showView(pref("view", "simple"));
 }
 init();
