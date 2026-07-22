@@ -211,12 +211,15 @@
             <div class="panel-head"><h3>Click Points</h3>
               <label class="switch"><input type="checkbox" id="p-enable"><span class="track"></span></label>
             </div>
-            <p class="muted">Click a list of spots on screen one after another. Each spot uses the current speed.</p>
-            <button class="primary ghost" id="p-pick">Start Picking</button>
-            <div class="empty">
-              <p class="empty-cap">No click points yet</p>
-              <p class="empty-sub">Hit Start Picking, then click spots on screen.</p>
+            <p class="muted">Click a list of spots on screen one after another. Each spot uses the current speed. Enable to make the clicker walk them in order.</p>
+            <div class="preset-save">
+              <button class="primary ghost" id="p-pick" style="flex:1">Start Picking</button>
+              <button class="mini" id="p-clear">Clear</button>
             </div>
+            <p class="muted" id="p-hint" style="margin-top:12px;margin-bottom:0">Hit Start Picking, then right-click spots on screen.</p>
+            <div id="p-list" class="point-list"></div>
+            <div class="setting" style="margin-top:8px"><div><b>Stop when complete</b><span>Stop after one full pass.</span></div>
+              <label class="switch"><input type="checkbox" id="p-stopcomplete"><span class="track"></span></label></div>
           </div>
         </section>
 

@@ -89,6 +89,8 @@ mod tests {
             randomize_pct: 0,
             click_kind: 0,
             key_vk: 0x20,
+            sequence: false,
+            stop_when_complete: false,
         }
     }
 

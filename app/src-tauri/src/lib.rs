@@ -8,13 +8,16 @@
 
 use clicker_core::profile::{self, Profile};
 use clicker_core::runtime::EngineHandle;
-use clicker_core::{EngineState, SharedState};
+use clicker_core::{EngineState, PositionMode, SharedState};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 struct AppState {
     shared: Arc<SharedState>,
     engine: Mutex<Option<EngineHandle>>,
     zones: Arc<Mutex<Zones>>,
+    picking: Arc<AtomicBool>,
+    points: Arc<Mutex<Vec<(i32, i32)>>>,
 }
 
 /// Cursor-position stop regions. Purely a safety layer in the app; the engine's
@@ -210,6 +213,80 @@ fn set_zones(zones: Zones, state: tauri::State<'_, AppState>) {
     *state.zones.lock().unwrap() = zones;
 }
 
+// --- Click points ---
+
+#[tauri::command]
+fn set_sequence(enabled: bool, stop_when_complete: bool, state: tauri::State<'_, AppState>) {
+    state.shared.set_position_mode(if enabled {
+        PositionMode::Sequence
+    } else {
+        PositionMode::FollowCursor
+    });
+    state.shared.set_stop_when_complete(stop_when_complete);
+}
+
+#[tauri::command]
+fn start_picking(state: tauri::State<'_, AppState>) {
+    state.points.lock().unwrap().clear();
+    state.shared.set_points(&[]);
+    state.picking.store(true, Ordering::Relaxed);
+}
+
+#[tauri::command]
+fn stop_picking(state: tauri::State<'_, AppState>) {
+    state.picking.store(false, Ordering::Relaxed);
+}
+
+#[tauri::command]
+fn clear_points(state: tauri::State<'_, AppState>) {
+    state.points.lock().unwrap().clear();
+    state.shared.set_points(&[]);
+}
+
+#[tauri::command]
+fn get_points(state: tauri::State<'_, AppState>) -> Vec<[i32; 2]> {
+    state.points.lock().unwrap().iter().map(|&(x, y)| [x, y]).collect()
+}
+
+/// Poll for right-clicks while picking and record the cursor position as a
+/// point. A polling edge-detector avoids a global mouse hook.
+#[cfg(windows)]
+fn spawn_point_picker(
+    shared: Arc<SharedState>,
+    picking: Arc<AtomicBool>,
+    points: Arc<Mutex<Vec<(i32, i32)>>>,
+) {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_RBUTTON};
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    std::thread::spawn(move || {
+        let mut was_down = false;
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            if !picking.load(Ordering::Relaxed) {
+                was_down = false;
+                continue;
+            }
+            // SAFETY: GetAsyncKeyState takes a plain VK; the high bit is the
+            // pressed state.
+            let down = unsafe { GetAsyncKeyState(VK_RBUTTON.0 as i32) as u16 & 0x8000 != 0 };
+            if down && !was_down {
+                let mut p = POINT::default();
+                // SAFETY: `p` is a valid writable POINT.
+                unsafe {
+                    let _ = GetCursorPos(&mut p);
+                }
+                let mut pts = points.lock().unwrap();
+                if pts.len() < clicker_core::shared::MAX_POINTS {
+                    pts.push((p.x, p.y));
+                    shared.set_points(&pts);
+                }
+            }
+            was_down = down;
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let shared = Arc::new(SharedState::new());
@@ -225,9 +302,14 @@ pub fn run() {
 
     let shared_for_hotkey = shared.clone();
     let zones = Arc::new(Mutex::new(Zones::default()));
+    let picking = Arc::new(AtomicBool::new(false));
+    let points = Arc::new(Mutex::new(Vec::new()));
     #[cfg(windows)]
-    spawn_zone_monitor(shared.clone(), zones.clone());
-    let state = AppState { shared, engine: Mutex::new(engine), zones };
+    {
+        spawn_zone_monitor(shared.clone(), zones.clone());
+        spawn_point_picker(shared.clone(), picking.clone(), points.clone());
+    }
+    let state = AppState { shared, engine: Mutex::new(engine), zones, picking, points };
 
     use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut, ShortcutState};
     // Default global toggle: F6. Fires only on key-down, and flips running.
@@ -263,7 +345,12 @@ pub fn run() {
             get_preset,
             save_preset,
             delete_preset,
-            set_zones
+            set_zones,
+            set_sequence,
+            start_picking,
+            stop_picking,
+            clear_points,
+            get_points
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Auto Clicker");

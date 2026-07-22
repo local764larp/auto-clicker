@@ -63,6 +63,8 @@ impl<C: Clock, W: Waiter, S: ClickSink> Engine<C, W, S> {
         let mut run_start_ns: u64 = 0;
         let mut clicks_this_run: u64 = 0;
         let mut was_running = false;
+        // Index into the click-point sequence (sequence mode only).
+        let mut seq_index: usize = 0;
 
         // `clicks_emitted` is monotonic for the process lifetime; limits are
         // per-run. Seed the local total from whatever the counter already holds.
@@ -86,6 +88,7 @@ impl<C: Clock, W: Waiter, S: ClickSink> Engine<C, W, S> {
                 was_running = true;
                 run_start_ns = now_ns;
                 clicks_this_run = 0;
+                seq_index = 0;
                 deadline_ns = now_ns;
                 shared.set_engine_state(EngineState::Running);
             }
@@ -111,11 +114,23 @@ impl<C: Clock, W: Waiter, S: ClickSink> Engine<C, W, S> {
                     self.waiter.wait_until(until_ns, &self.clock);
                 }
                 Decision::Fire { next_deadline_ns } => {
-                    // Batching only applies unthrottled: batched events carry no
-                    // temporal spacing, so batching a throttled rate would
-                    // destroy the requested interval.
-                    let mut batch: u64 =
-                        if cfg.interval_ns == 0 { cfg.batch_size.max(1) as u64 } else { 1 };
+                    // Click-point sequence: this click lands on the current
+                    // point, and the index advances afterward. An empty list
+                    // falls through to the normal position.
+                    let seq = cfg.sequence && shared.points_len() > 0;
+                    let position = if seq {
+                        Some(shared.point(seq_index))
+                    } else {
+                        cfg.position
+                    };
+
+                    // Batching only applies unthrottled and never in sequence
+                    // mode (each click may target a different point).
+                    let mut batch: u64 = if cfg.interval_ns == 0 && !seq {
+                        cfg.batch_size.max(1) as u64
+                    } else {
+                        1
+                    };
 
                     // Never overshoot a click limit just because of batching.
                     if cfg.limit_clicks != 0 {
@@ -134,7 +149,7 @@ impl<C: Clock, W: Waiter, S: ClickSink> Engine<C, W, S> {
                     let use_duty = cfg.duty_pct > 0 && batch == 1 && cfg.interval_ns > 0;
                     let result = if use_duty {
                         let hold = cfg.interval_ns / 100 * cfg.duty_pct as u64;
-                        match self.sink.press(cfg.button, cfg.position) {
+                        match self.sink.press(cfg.button, position) {
                             Ok(()) => {
                                 self.waiter
                                     .wait_until(self.clock.now_ns() + hold, &self.clock);
@@ -143,7 +158,7 @@ impl<C: Clock, W: Waiter, S: ClickSink> Engine<C, W, S> {
                             Err(e) => Err(e),
                         }
                     } else {
-                        self.sink.emit_batch(cfg.button, cfg.position, batch as u16)
+                        self.sink.emit_batch(cfg.button, position, batch as u16)
                     };
 
                     match result {
@@ -152,6 +167,20 @@ impl<C: Clock, W: Waiter, S: ClickSink> Engine<C, W, S> {
                             total_clicks += n as u64;
                             shared.store_clicks(total_clicks);
                             deadline_ns = next_deadline_ns;
+
+                            // Advance the sequence; stop after a full pass if asked.
+                            if seq {
+                                let len = shared.points_len();
+                                seq_index += 1;
+                                if seq_index >= len {
+                                    seq_index = 0;
+                                    if cfg.stop_when_complete {
+                                        shared.set_running(false);
+                                        shared.set_engine_state(EngineState::StoppedByLimit);
+                                        was_running = false;
+                                    }
+                                }
+                            }
                         }
                         Err(_e) => {
                             // Blocked input is a distinct state, never a silent
@@ -384,6 +413,48 @@ mod tests {
         for (i, c) in eng.sink().clicks().iter().enumerate() {
             assert_eq!(c.at_ns, i as u64 * 1_000_000, "no jitter must mean no drift");
         }
+    }
+
+    #[test]
+    fn sequence_mode_walks_the_points_in_order() {
+        let (_clock, mut eng) = harness(0);
+        let shared = SharedState::new();
+        shared.set_interval_ns(1_000_000);
+        shared.set_position_mode(PositionMode::Sequence);
+        shared.set_points(&[(10, 10), (20, 20), (30, 30)]);
+        shared.set_limit_clicks(6); // exactly two full passes
+        shared.set_running(true);
+
+        run_until(&mut eng, &shared, EngineState::StoppedByLimit);
+
+        let seq: Vec<Option<(i32, i32)>> = eng.sink().clicks().iter().map(|c| c.pos).collect();
+        assert_eq!(
+            seq,
+            vec![
+                Some((10, 10)),
+                Some((20, 20)),
+                Some((30, 30)),
+                Some((10, 10)),
+                Some((20, 20)),
+                Some((30, 30)),
+            ]
+        );
+    }
+
+    #[test]
+    fn sequence_stop_when_complete_stops_after_one_pass() {
+        let (_clock, mut eng) = harness(0);
+        let shared = SharedState::new();
+        shared.set_interval_ns(1_000_000);
+        shared.set_position_mode(PositionMode::Sequence);
+        shared.set_points(&[(1, 1), (2, 2), (3, 3), (4, 4)]);
+        shared.set_stop_when_complete(true);
+        shared.set_running(true);
+
+        run_until(&mut eng, &shared, EngineState::StoppedByLimit);
+
+        // Exactly one pass: 4 clicks, then stop.
+        assert_eq!(eng.sink().total(), 4);
     }
 
     #[test]

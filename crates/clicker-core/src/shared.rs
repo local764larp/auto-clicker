@@ -27,16 +27,23 @@ impl Button {
 pub enum PositionMode {
     FollowCursor = 0,
     FixedPoint = 1,
+    /// Click a sequence of points in order, one per click.
+    Sequence = 2,
 }
 
 impl PositionMode {
     pub fn from_u8(v: u8) -> Self {
         match v {
             1 => PositionMode::FixedPoint,
+            2 => PositionMode::Sequence,
             _ => PositionMode::FollowCursor,
         }
     }
 }
+
+/// Maximum click points in a sequence. Fixed so the array can live in the
+/// atomics block and the hot loop never allocates.
+pub const MAX_POINTS: usize = 64;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -77,6 +84,10 @@ pub struct Config {
     pub click_kind: u8,
     /// Virtual-key pressed in keyboard mode.
     pub key_vk: u32,
+    /// True when `position_mode` is `Sequence`: the engine walks the point list.
+    pub sequence: bool,
+    /// Stop after one full pass through the point sequence.
+    pub stop_when_complete: bool,
 }
 
 /// Shared between the GUI/host thread and the engine thread. Every field is an
@@ -99,6 +110,9 @@ pub struct SharedState {
     randomize_pct: AtomicU8,
     click_kind: AtomicU8,
     key_vk: AtomicU32,
+    points: [AtomicI32; MAX_POINTS * 2],
+    points_len: core::sync::atomic::AtomicUsize,
+    stop_when_complete: AtomicBool,
 }
 
 impl Default for SharedState {
@@ -126,6 +140,9 @@ impl SharedState {
             randomize_pct: AtomicU8::new(0),
             click_kind: AtomicU8::new(0),
             key_vk: AtomicU32::new(0x20), // Space
+            points: [const { AtomicI32::new(0) }; MAX_POINTS * 2],
+            points_len: core::sync::atomic::AtomicUsize::new(0),
+            stop_when_complete: AtomicBool::new(false),
         }
     }
 
@@ -134,7 +151,7 @@ impl SharedState {
     pub fn snapshot(&self) -> Config {
         let mode = PositionMode::from_u8(self.position_mode.load(Ordering::Relaxed));
         let position = match mode {
-            PositionMode::FollowCursor => None,
+            PositionMode::FollowCursor | PositionMode::Sequence => None,
             PositionMode::FixedPoint => Some((
                 self.fixed_x.load(Ordering::Relaxed),
                 self.fixed_y.load(Ordering::Relaxed),
@@ -151,6 +168,8 @@ impl SharedState {
             randomize_pct: self.randomize_pct.load(Ordering::Relaxed),
             click_kind: self.click_kind.load(Ordering::Relaxed),
             key_vk: self.key_vk.load(Ordering::Relaxed),
+            sequence: mode == PositionMode::Sequence,
+            stop_when_complete: self.stop_when_complete.load(Ordering::Relaxed),
         }
     }
 
@@ -221,6 +240,31 @@ impl SharedState {
     }
     pub fn set_key_vk(&self, v: u32) {
         self.key_vk.store(v, Ordering::Relaxed);
+    }
+    pub fn set_stop_when_complete(&self, v: bool) {
+        self.stop_when_complete.store(v, Ordering::Relaxed);
+    }
+    /// Replace the click-point sequence (truncated to `MAX_POINTS`).
+    pub fn set_points(&self, pts: &[(i32, i32)]) {
+        let n = pts.len().min(MAX_POINTS);
+        for (i, (x, y)) in pts.iter().take(n).enumerate() {
+            self.points[i * 2].store(*x, Ordering::Relaxed);
+            self.points[i * 2 + 1].store(*y, Ordering::Relaxed);
+        }
+        self.points_len.store(n, Ordering::Relaxed);
+    }
+    pub fn points_len(&self) -> usize {
+        self.points_len.load(Ordering::Relaxed)
+    }
+    /// The `i`-th point, or `(0, 0)` if out of range.
+    pub fn point(&self, i: usize) -> (i32, i32) {
+        if i >= self.points_len() {
+            return (0, 0);
+        }
+        (
+            self.points[i * 2].load(Ordering::Relaxed),
+            self.points[i * 2 + 1].load(Ordering::Relaxed),
+        )
     }
     pub fn key_vk(&self) -> u32 {
         self.key_vk.load(Ordering::Relaxed)

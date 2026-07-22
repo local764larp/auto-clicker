@@ -131,6 +131,34 @@ function pushZones() {
 ["z-corner", "z-edge", "z-custom"].forEach((id) => $("#" + id).addEventListener("change", pushZones));
 $$('.view[data-view="zones"] input[type=number]').forEach((i) => i.addEventListener("input", pushZones));
 
+// ---------- Click Points ----------
+let picking = false;
+function applySequence() {
+  invoke("set_sequence", { enabled: $("#p-enable").checked, stopWhenComplete: $("#p-stopcomplete").checked }).catch(() => {});
+}
+$("#p-enable").addEventListener("change", applySequence);
+$("#p-stopcomplete").addEventListener("change", applySequence);
+$("#p-pick").addEventListener("click", async () => {
+  picking = !picking;
+  $("#p-pick").textContent = picking ? "Stop Picking" : "Start Picking";
+  $("#p-pick").classList.toggle("running", picking);
+  $("#p-hint").textContent = picking ? "Right-click spots on screen to add them." : "Hit Start Picking, then right-click spots on screen.";
+  await invoke(picking ? "start_picking" : "stop_picking").catch(() => {});
+});
+$("#p-clear").addEventListener("click", () => invoke("clear_points").then(refreshPoints));
+async function refreshPoints() {
+  const pts = await invoke("get_points").catch(() => []);
+  const list = $("#p-list");
+  list.innerHTML = "";
+  pts.forEach((p, i) => {
+    const row = document.createElement("div");
+    row.className = "point-row";
+    row.textContent = `#${i + 1}   x ${p[0]}, y ${p[1]}`;
+    list.appendChild(row);
+  });
+}
+setInterval(() => { if (picking) refreshPoints(); }, 300);
+
 // ---------- Behavior ----------
 $("#b-ontop").addEventListener("change", (e) => { win.setAlwaysOnTop(e.target.checked); $("#pin").classList.toggle("on", e.target.checked); prefs.ontop = e.target.checked; savePrefs(); });
 $("#b-extended").addEventListener("change", (e) => { prefs.extended = e.target.checked; savePrefs(); sCps.max = maxCps(); aCps.max = maxCps(); });
@@ -261,6 +289,7 @@ async function init() {
     $("#z-custom").checked = !!prefs.zones.custom;
   }
   pushZones();
+  refreshPoints();
   showView(pref("view", "simple"));
 }
 init();

@@ -248,3 +248,8 @@ input[type="color"] { width: 42px; height: 34px; border: none; border-radius: 10
   font-size: 11.5px; color: var(--dim); background: var(--bg); border-top: 1px solid var(--line);
 }
 #status-left.active { color: var(--accent); }
+
+/* Click points */
+.point-list { display: flex; flex-direction: column; gap: 6px; margin: 14px 0; }
+.point-row { padding: 9px 14px; border-radius: 10px; background: var(--panel); font-size: 13px; color: var(--dim);
+  box-shadow: inset 2px 2px 5px var(--sh-d), inset -2px -2px 5px var(--sh-l); }
