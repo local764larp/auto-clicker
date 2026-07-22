@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Auto Clicker</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <div class="titlebar" data-tauri-drag-region>
+        <span class="title" data-tauri-drag-region>Auto Clicker</span>
+        <div class="win-controls">
+          <button id="min" class="winbtn">—</button>
+          <button id="close" class="winbtn">✕</button>
+        </div>
+      </div>
+      <main>
+        <div class="card">
+          <div class="readout" id="readout">0</div>
+          <div class="readout-cap">clicks / sec</div>
+        </div>
+        <div class="card row">
+          <label>Rate (CPS)</label>
+          <input id="cps" type="number" min="1" max="4000" value="100" />
+        </div>
+        <button id="toggle" class="primary">Start</button>
+      </main>
+    </div>
+    <script src="main.js"></script>
+  </body>
+</html>

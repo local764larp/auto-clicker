@@ -1,0 +1,62 @@
+:root {
+  --base: #2e3239;
+  --shadow-dark: #23262b;
+  --shadow-light: #3a3f47;
+  --text: #e0e5ec;
+  --text-dim: #9aa3b0;
+  --accent: #22c55e;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  background: transparent;
+  color: var(--text);
+  user-select: none;
+}
+#app {
+  height: 100vh;
+  background: var(--base);
+  border-radius: 16px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.titlebar {
+  height: 44px;
+  display: flex;
+  align-items: center;
+  padding: 0 8px 0 18px;
+  justify-content: space-between;
+}
+.title { font-weight: 600; font-size: 14px; }
+.win-controls { display: flex; gap: 4px; }
+.winbtn {
+  width: 34px; height: 30px; border: none; border-radius: 8px;
+  background: transparent; color: var(--text-dim); cursor: pointer; font-size: 13px;
+}
+.winbtn:hover { background: var(--shadow-dark); color: var(--text); }
+main { flex: 1; padding: 24px; display: flex; flex-direction: column; gap: 20px; }
+.card {
+  background: var(--base);
+  border-radius: 18px;
+  padding: 22px;
+  box-shadow: 6px 6px 12px var(--shadow-dark), -6px -6px 12px var(--shadow-light);
+}
+.card.row { display: flex; align-items: center; justify-content: space-between; }
+.readout { font-size: 64px; font-weight: 700; text-align: center; }
+.readout-cap { text-align: center; color: var(--text-dim); font-size: 13px; letter-spacing: 1px; }
+label { color: var(--text-dim); font-size: 14px; }
+input[type="number"] {
+  width: 120px; padding: 10px 14px; border: none; border-radius: 12px;
+  background: var(--base); color: var(--text); font-size: 15px; text-align: right;
+  box-shadow: inset 4px 4px 8px var(--shadow-dark), inset -4px -4px 8px var(--shadow-light);
+}
+input:focus { outline: 2px solid var(--accent); }
+.primary {
+  padding: 18px; border: none; border-radius: 16px; font-size: 18px; font-weight: 600;
+  color: var(--text); background: var(--base); cursor: pointer;
+  box-shadow: 6px 6px 12px var(--shadow-dark), -6px -6px 12px var(--shadow-light);
+}
+.primary:active { box-shadow: inset 4px 4px 8px var(--shadow-dark), inset -4px -4px 8px var(--shadow-light); }
+.primary.running { color: var(--accent); }
