@@ -38,7 +38,10 @@ mod win {
 
     pub struct App {
         pub shared: Arc<SharedState>,
-        _engine: EngineHandle,
+        /// `None` in render-only mode (env `CLICKER_NO_ENGINE`), used by the
+        /// timing gate so the GUI can run its message pump and rendering
+        /// alongside the bench's engine without a second F8 registration.
+        _engine: Option<EngineHandle>,
         pub states: HashMap<WidgetId, WidgetState>,
         pub focus: FocusRing<WidgetId>,
         pub cps: u32,
@@ -57,7 +60,13 @@ mod win {
             let shared = Arc::new(SharedState::new());
             let cps = 100u32;
             apply_cps(&shared, cps);
-            let engine = EngineHandle::start(shared.clone()).map_err(|e| e.to_string())?;
+            // Render-only mode for the timing gate: skip the engine (and its F8
+            // registration) so the GUI can run beside the bench's engine.
+            let engine = if std::env::var_os("CLICKER_NO_ENGINE").is_some() {
+                None
+            } else {
+                Some(EngineHandle::start(shared.clone()).map_err(|e| e.to_string())?)
+            };
 
             let mut states = HashMap::new();
             for id in ALL_WIDGETS {
@@ -87,6 +96,11 @@ mod win {
                 last_clicks: 0,
                 last_cps: 0,
             })
+        }
+
+        /// False in render-only mode (timing gate).
+        pub fn has_engine(&self) -> bool {
+            self._engine.is_some()
         }
 
         pub fn state(&self, id: WidgetId) -> WidgetState {

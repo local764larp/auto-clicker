@@ -265,13 +265,24 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                     Ok(d) => st.device = Some(d),
                     Err(e) => eprintln!("device creation failed: {e}"),
                 }
-                match App::new(st.dpi_scale, st.theme) {
-                    Ok(a) => st.app = Some(a),
-                    Err(e) => eprintln!("engine failed to start: {e}"),
-                }
+                let render_only = match App::new(st.dpi_scale, st.theme) {
+                    Ok(a) => {
+                        let ro = !a.has_engine();
+                        st.app = Some(a);
+                        ro
+                    }
+                    Err(e) => {
+                        eprintln!("engine failed to start: {e}");
+                        false
+                    }
+                };
+                // In render-only mode (timing gate) the timer drives a
+                // continuous 60 Hz full repaint — a heavier load than the real
+                // 10-Hz-on-change design, so the gate over-stresses the engine.
+                let interval = if render_only { 16 } else { READOUT_INTERVAL_MS };
                 // SAFETY: `hwnd` is live; the readout timer drives the CPS sample.
                 unsafe {
-                    let _ = SetTimer(Some(hwnd), READOUT_TIMER, READOUT_INTERVAL_MS, None);
+                    let _ = SetTimer(Some(hwnd), READOUT_TIMER, interval, None);
                 }
             }
             LRESULT(0)
@@ -437,6 +448,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                 // SAFETY: `p` is live state. One Relaxed load of clicks_emitted;
                 // invalidate only the readout rect so nothing else repaints.
                 let st = unsafe { &mut *p };
+                if st.app.as_ref().is_some_and(|a| !a.has_engine()) {
+                    // Render-only gate: force a full repaint to stress the GUI.
+                    invalidate_all(hwnd);
+                    return LRESULT(0);
+                }
                 if let Some(app) = st.app.as_mut() {
                     let before = app.last_cps;
                     let now = app.sample_cps(READOUT_INTERVAL_MS as f64 / 1000.0);

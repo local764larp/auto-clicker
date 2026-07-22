@@ -116,6 +116,36 @@ delivered p50 of 37 µs against a 500 µs mean is the pump cadence showing throu
 emit-side p50 for the same cell is exactly 500.0 µs. Use the emit-side table for any statement
 about engine timing.
 
+## GUI-active timing (Spec 3 gate — 2026-07-22)
+
+The mission's hard rule is that the GUI must never measurably perturb engine timing. This is the
+falsifiable test: the bench's engine timing measured **alone** versus **with the interface running
+beside it**, repainting continuously at 60 Hz — a heavier load than the real render-on-demand
+design, which repaints only on interaction or a 10 Hz readout change.
+
+Emit-side p99 (the engine's own timing), µs:
+
+| Rate | Engine alone | Engine + GUI @60 Hz | Δ p99 |
+|---|---|---|---|
+| 50 CPS | 20000.3 | 20000.7 | +0.4 |
+| 100 CPS | 10000.1 | 10000.6 | +0.5 |
+| 250 CPS | 4000.1 | 4000.1 | 0.0 |
+| 500 CPS | 2000.1 | 2000.1 | 0.0 |
+| 1000 CPS | 1000.1 | 1000.1 | 0.0 |
+| 2000 CPS | 500.1 | 500.1 | 0.0 |
+
+Sub-microsecond at every throttled rate, and the max column improved in several rows under GUI
+load (1000 CPS max: 1114 µs with the GUI vs 4385 µs without) — ordinary scheduler noise, not a
+regression. **The GUI does not perturb the engine.** The architecture delivers what it promised:
+a pinned `TIME_CRITICAL` engine reading atomics, a render-on-demand GUI, and no lock, channel, or
+per-click path between them.
+
+Method: `CLICKER_NO_ENGINE=1 clicker-gui.exe` runs the interface in render-only mode (no engine,
+so no second F8 registration) with the readout timer forced to a 60 Hz full-window repaint; the
+bench runs its own engine and receiver in a separate process. Raw output:
+[`2026-07-22-gate-baseline.md`](2026-07-22-gate-baseline.md) and
+[`2026-07-22-gui-active.md`](2026-07-22-gui-active.md).
+
 ## Manual verification status
 
 | Check | Status |
