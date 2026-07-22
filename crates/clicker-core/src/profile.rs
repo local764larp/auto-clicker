@@ -46,6 +46,16 @@ pub struct Profile {
     /// Interval jitter, in percent.
     #[serde(default)]
     pub randomize_pct: u8,
+    /// 0 = mouse button, 1 = keyboard key.
+    #[serde(default)]
+    pub click_kind: u8,
+    /// Virtual-key pressed in keyboard mode.
+    #[serde(default = "default_key_vk")]
+    pub key_vk: u32,
+}
+
+fn default_key_vk() -> u32 {
+    0x20 // Space
 }
 
 impl Default for Profile {
@@ -64,6 +74,8 @@ impl Default for Profile {
             high_priority: false,
             duty_pct: 0,
             randomize_pct: 0,
+            click_kind: 0,
+            key_vk: default_key_vk(),
         }
     }
 }

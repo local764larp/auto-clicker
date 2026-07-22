@@ -90,7 +90,7 @@ segmented("a-speedmode", (v) => {
   $("#a-cps-unit").textContent = v === "rate" ? "Clicks / sec" : "Interval (ms)";
 });
 segmented("a-hotkeymode", (v) => { prefs.hotkeymode = v; segSet("s-hotkeymode", v); savePrefs(); });
-segmented("a-type", (v) => { prefs.clickerType = v; savePrefs(); });
+segmented("a-type", (v) => { cfg.click_kind = v === "keyboard" ? 1 : 0; pushConfig(); });
 segmented("a-button", (v) => { cfg.button = v; segSet("s-button", v); pushConfig(); });
 
 const limitOn = $("#a-limit-on"), limitVal = $("#a-limit-val");
@@ -227,7 +227,7 @@ async function init() {
   randOn.checked = pref("randOn", false); rand.disabled = !randOn.checked;
   rand.value = pref("rand", 0); randVal.textContent = rand.value + "%";
   segSet("s-hotkeymode", pref("hotkeymode", "toggle")); segSet("a-hotkeymode", pref("hotkeymode", "toggle"));
-  segSet("a-type", pref("clickerType", "mouse"));
+  segSet("a-type", cfg.click_kind === 1 ? "keyboard" : "mouse");
   sCps.max = maxCps(); aCps.max = maxCps();
 
   // engine config from backend profile

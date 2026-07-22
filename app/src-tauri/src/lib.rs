@@ -25,6 +25,8 @@ fn apply_to_shared(s: &SharedState, p: &Profile) {
     s.set_limit_ns(p.limit_ns);
     s.set_duty_pct(p.duty_pct);
     s.set_randomize_pct(p.randomize_pct);
+    s.set_click_kind(p.click_kind);
+    s.set_key_vk(p.key_vk);
 }
 
 #[derive(serde::Serialize)]
@@ -138,9 +140,32 @@ pub fn run() {
     // unavailable and `has_engine` reports false.
     let engine = EngineHandle::start(shared.clone()).ok();
 
+    let shared_for_hotkey = shared.clone();
     let state = AppState { shared, engine: Mutex::new(engine) };
 
+    use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Shortcut, ShortcutState};
+    // Default global toggle: F6. Fires only on key-down, and flips running.
+    let toggle = Shortcut::new(None, Code::F6);
+
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(move |_app, _sc, event| {
+                    if event.state() == ShortcutState::Pressed {
+                        let now = !shared_for_hotkey.running();
+                        if now {
+                            shared_for_hotkey.set_engine_state(EngineState::Idle);
+                        }
+                        shared_for_hotkey.set_running(now);
+                    }
+                })
+                .build(),
+        )
+        .setup(move |app| {
+            // A failed registration (key already owned) is non-fatal.
+            let _ = app.global_shortcut().register(toggle);
+            Ok(())
+        })
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             get_status,

@@ -132,6 +132,8 @@ mod win {
                 high_priority: self.high_priority,
                 duty_pct: cfg.duty_pct,
                 randomize_pct: cfg.randomize_pct,
+                click_kind: cfg.click_kind,
+                key_vk: cfg.key_vk,
             }
         }
 

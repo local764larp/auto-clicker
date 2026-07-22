@@ -3,7 +3,7 @@ use crate::clock::QpcClock;
 use crate::engine::Engine;
 use crate::hotkey::{HotkeyError, PanicHotkey, DEFAULT_PANIC_VK};
 use crate::shared::SharedState;
-use crate::sink_win32::SendInputSink;
+use crate::sink_win32::SystemInputSink;
 use crate::wait::HybridWaiter;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -32,9 +32,11 @@ const NOT_PINNED: u32 = u32::MAX;
 pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(2000);
 
 impl EngineHandle {
-    /// Start with the production `SendInputSink`.
+    /// Start with the production `SystemInputSink` (mouse or keyboard, chosen
+    /// at runtime by `SharedState::click_kind`).
     pub fn start(shared: Arc<SharedState>) -> Result<Self, HotkeyError> {
-        Self::start_with_sink(shared, |_clock| SendInputSink::new())
+        let for_sink = shared.clone();
+        Self::start_with_sink(shared, move |_clock| SystemInputSink::new(for_sink))
     }
 
     /// Start with a caller-supplied sink, built on the engine thread.

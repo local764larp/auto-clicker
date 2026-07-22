@@ -87,6 +87,8 @@ mod tests {
             batch_size: 1,
             duty_pct: 0,
             randomize_pct: 0,
+            click_kind: 0,
+            key_vk: 0x20,
         }
     }
 

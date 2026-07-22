@@ -1,4 +1,6 @@
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering,
+};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
@@ -71,6 +73,10 @@ pub struct Config {
     /// Interval jitter, in percent. Each period is scaled by a random factor in
     /// `[1 - r, 1 + r]`. 0 = perfectly regular.
     pub randomize_pct: u8,
+    /// 0 = click a mouse button, 1 = press a keyboard key (`key_vk`).
+    pub click_kind: u8,
+    /// Virtual-key pressed in keyboard mode.
+    pub key_vk: u32,
 }
 
 /// Shared between the GUI/host thread and the engine thread. Every field is an
@@ -91,6 +97,8 @@ pub struct SharedState {
     batch_size: AtomicU16,
     duty_pct: AtomicU8,
     randomize_pct: AtomicU8,
+    click_kind: AtomicU8,
+    key_vk: AtomicU32,
 }
 
 impl Default for SharedState {
@@ -116,6 +124,8 @@ impl SharedState {
             batch_size: AtomicU16::new(1),
             duty_pct: AtomicU8::new(0),
             randomize_pct: AtomicU8::new(0),
+            click_kind: AtomicU8::new(0),
+            key_vk: AtomicU32::new(0x20), // Space
         }
     }
 
@@ -139,6 +149,8 @@ impl SharedState {
             batch_size: self.batch_size.load(Ordering::Relaxed),
             duty_pct: self.duty_pct.load(Ordering::Relaxed),
             randomize_pct: self.randomize_pct.load(Ordering::Relaxed),
+            click_kind: self.click_kind.load(Ordering::Relaxed),
+            key_vk: self.key_vk.load(Ordering::Relaxed),
         }
     }
 
@@ -203,6 +215,18 @@ impl SharedState {
     }
     pub fn set_randomize_pct(&self, v: u8) {
         self.randomize_pct.store(v.min(95), Ordering::Relaxed);
+    }
+    pub fn set_click_kind(&self, v: u8) {
+        self.click_kind.store(v, Ordering::Relaxed);
+    }
+    pub fn set_key_vk(&self, v: u32) {
+        self.key_vk.store(v, Ordering::Relaxed);
+    }
+    pub fn key_vk(&self) -> u32 {
+        self.key_vk.load(Ordering::Relaxed)
+    }
+    pub fn click_kind(&self) -> u8 {
+        self.click_kind.load(Ordering::Relaxed)
     }
 }
 
