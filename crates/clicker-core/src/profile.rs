@@ -99,6 +99,9 @@ pub fn parse_or_default(bytes: Option<&[u8]>) -> (Profile, LoadNote) {
     let Some(bytes) = bytes else {
         return (Profile::default(), LoadNote::Missing);
     };
+    // Tolerate a UTF-8 BOM: some editors (Notepad) prepend one, and a hand-edit
+    // should not be treated as corrupt. serde_json rejects a leading BOM.
+    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
     // Peek the schema first so a future version is a clean fallback, not a
     // parse against a shape we do not understand.
     match serde_json::from_slice::<Profile>(bytes) {
@@ -229,6 +232,16 @@ mod tests {
         let (back, _) = parse_or_default(Some(p.to_json().as_bytes()));
         assert_ne!(back.toggle_vk, VK_F8, "toggle must not bind F8");
         assert_eq!(back.hold_vk, 0, "hold on F8 must be disabled");
+    }
+
+    #[test]
+    fn a_utf8_bom_is_tolerated() {
+        // Notepad and PowerShell's utf8 encoding prepend a BOM; a hand-edited
+        // profile with one must still load rather than silently reset.
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(Profile::default().to_json().as_bytes());
+        let (_, note) = parse_or_default(Some(&bytes));
+        assert_eq!(note, LoadNote::Ok, "a BOM should not read as corrupt");
     }
 
     #[test]

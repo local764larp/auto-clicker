@@ -53,13 +53,26 @@ mod win {
         pub text: TextRenderer,
         last_clicks: u64,
         pub last_cps: u32,
+        pub toggle_vk: u32,
+        pub hold_vk: u32,
+        pub high_priority: bool,
+        pub load_note: clicker_core::profile::LoadNote,
     }
 
     impl App {
         pub fn new(dpi_scale: f32, theme: Theme) -> Result<App, String> {
             let shared = Arc::new(SharedState::new());
-            let cps = 100u32;
+
+            // Restore persisted settings (defaults on any failure, with a note).
+            let (prof, load_note) = clicker_core::profile::load_or_default();
+            let cps = prof.cps;
             apply_cps(&shared, cps);
+            shared.set_button(prof.button);
+            shared.set_position_mode(prof.position_mode);
+            shared.set_fixed_point(prof.fixed_x, prof.fixed_y);
+            shared.set_limit_clicks(prof.limit_clicks);
+            shared.set_limit_ns(prof.limit_ns);
+
             // Render-only mode for the timing gate: skip the engine (and its F8
             // registration) so the GUI can run beside the bench's engine.
             let engine = if std::env::var_os("CLICKER_NO_ENGINE").is_some() {
@@ -88,14 +101,53 @@ mod win {
                 focus,
                 cps,
                 field_text: cps.to_string(),
-                mode: PositionMode::FollowCursor,
+                mode: prof.position_mode,
                 palette: Palette::for_theme(theme),
                 dpi_scale,
                 cache: SurfaceCache::new(),
                 text: TextRenderer::new().map_err(|e| e.to_string())?,
                 last_clicks: 0,
                 last_cps: 0,
+                toggle_vk: prof.toggle_vk,
+                hold_vk: prof.hold_vk,
+                high_priority: prof.high_priority,
+                load_note,
             })
+        }
+
+        /// Collect the current settings into a persistable profile.
+        pub fn to_profile(&self) -> clicker_core::profile::Profile {
+            let cfg = self.shared.snapshot();
+            clicker_core::profile::Profile {
+                schema: clicker_core::profile::SCHEMA_VERSION,
+                cps: self.cps,
+                button: cfg.button,
+                position_mode: self.mode,
+                fixed_x: cfg.position.map(|(x, _)| x).unwrap_or(0),
+                fixed_y: cfg.position.map(|(_, y)| y).unwrap_or(0),
+                limit_clicks: cfg.limit_clicks,
+                limit_ns: cfg.limit_ns,
+                toggle_vk: self.toggle_vk,
+                hold_vk: self.hold_vk,
+                high_priority: self.high_priority,
+            }
+        }
+
+        /// Persist the current settings. Best-effort: an IO error is ignored so
+        /// the app never fails to close over a bad disk. No-op in render-only
+        /// mode, which must not overwrite the user's real profile with defaults.
+        pub fn save(&self) {
+            if self.has_engine() {
+                let _ = clicker_core::profile::save_atomic(&self.to_profile());
+            }
+        }
+
+        /// Set the running flag directly (used by hold-to-click).
+        pub fn set_running(&mut self, run: bool) {
+            if run && !self.shared.running() {
+                self.shared.set_engine_state(clicker_core::EngineState::Idle);
+            }
+            self.shared.set_running(run);
         }
 
         /// False in render-only mode (timing gate).
