@@ -76,6 +76,53 @@ fn save_profile(profile: Profile) -> Result<(), String> {
     profile::save_atomic(&profile).map_err(|e| e.to_string())
 }
 
+// --- Presets: named profiles stored beside the profile file ---
+
+fn presets_path() -> Option<std::path::PathBuf> {
+    let p = profile::profile_path()?;
+    Some(p.with_file_name("presets.json"))
+}
+
+fn read_presets() -> std::collections::BTreeMap<String, Profile> {
+    presets_path()
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn write_presets(map: &std::collections::BTreeMap<String, Profile>) -> Result<(), String> {
+    let path = presets_path().ok_or("no APPDATA")?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let json = serde_json::to_string_pretty(map).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_presets() -> Vec<String> {
+    read_presets().into_keys().collect()
+}
+
+#[tauri::command]
+fn get_preset(name: String) -> Option<Profile> {
+    read_presets().get(&name).cloned()
+}
+
+#[tauri::command]
+fn save_preset(name: String, profile: Profile) -> Result<(), String> {
+    let mut map = read_presets();
+    map.insert(name, profile);
+    write_presets(&map)
+}
+
+#[tauri::command]
+fn delete_preset(name: String) -> Result<(), String> {
+    let mut map = read_presets();
+    map.remove(&name);
+    write_presets(&map)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let shared = Arc::new(SharedState::new());
@@ -98,7 +145,11 @@ pub fn run() {
             set_running,
             apply_config,
             load_profile,
-            save_profile
+            save_profile,
+            list_presets,
+            get_preset,
+            save_preset,
+            delete_preset
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Auto Clicker");

@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -8,24 +8,293 @@
   </head>
   <body>
     <div id="app">
-      <div class="titlebar" data-tauri-drag-region>
-        <span class="title" data-tauri-drag-region>Auto Clicker</span>
+      <!-- Title bar with top navigation -->
+      <header class="titlebar" data-tauri-drag-region>
+        <nav class="topnav">
+          <button class="navbtn" data-view="simple" title="Simple">
+            <svg viewBox="0 0 24 24"><path d="M6 3l14 8-6 2-2 6z"/></svg>
+          </button>
+          <button class="navbtn" data-view="advanced" title="Advanced">
+            <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+          </button>
+          <button class="navbtn" data-view="zones" title="Zones">
+            <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/></svg>
+          </button>
+          <button class="navbtn" data-view="points" title="Click Points">
+            <svg viewBox="0 0 24 24"><circle cx="7" cy="7" r="2.5"/><circle cx="17" cy="10" r="2.5"/><circle cx="10" cy="17" r="2.5"/></svg>
+          </button>
+          <button class="navbtn" data-view="settings" title="Settings">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></svg>
+          </button>
+        </nav>
+        <span class="brand" data-tauri-drag-region>Auto&nbsp;Clicker</span>
         <div class="win-controls">
-          <button id="min" class="winbtn">—</button>
-          <button id="close" class="winbtn">✕</button>
+          <button id="pin" class="winbtn" title="Always on top"><svg viewBox="0 0 24 24"><path d="M12 3v7l4 4H8l4-4V3z"/></svg></button>
+          <button id="min" class="winbtn" title="Minimize"><svg viewBox="0 0 24 24"><path d="M5 12h14"/></svg></button>
+          <button id="close" class="winbtn close" title="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
         </div>
-      </div>
-      <main>
-        <div class="card">
-          <div class="readout" id="readout">0</div>
-          <div class="readout-cap">clicks / sec</div>
-        </div>
-        <div class="card row">
-          <label>Rate (CPS)</label>
-          <input id="cps" type="number" min="1" max="4000" value="100" />
-        </div>
-        <button id="toggle" class="primary">Start</button>
+      </header>
+
+      <main id="main">
+        <!-- ================= SIMPLE ================= -->
+        <section class="view" data-view="simple">
+          <div class="panel readout-panel inset">
+            <div class="readout" id="readout">0</div>
+            <div class="readout-cap">clicks / second</div>
+            <div class="readout-sub" id="readout-sub">idle</div>
+          </div>
+
+          <div class="grid2">
+            <div class="panel">
+              <div class="field-lg">
+                <input id="s-cps" type="number" min="1" max="4000" value="100" />
+                <div class="field-side">
+                  <span class="field-label">Clicks per</span>
+                  <select id="s-unit">
+                    <option value="second">Second</option>
+                    <option value="minute">Minute</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+            <div class="panel">
+              <div class="seg-label">Mouse button</div>
+              <div class="segmented" id="s-button">
+                <button data-v="Left" class="active">Left</button>
+                <button data-v="Middle">Middle</button>
+                <button data-v="Right">Right</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid2">
+            <div class="panel">
+              <div class="seg-label">Target</div>
+              <div class="segmented" id="s-mode">
+                <button data-v="FollowCursor" class="active">Follow cursor</button>
+                <button data-v="FixedPoint">Fixed point</button>
+              </div>
+            </div>
+            <div class="panel">
+              <div class="seg-label">Hotkey mode</div>
+              <div class="segmented" id="s-hotkeymode">
+                <button data-v="toggle" class="active">Toggle</button>
+                <button data-v="hold">Hold</button>
+              </div>
+            </div>
+          </div>
+
+          <button id="s-toggle" class="primary">Start</button>
+        </section>
+
+        <!-- ================= ADVANCED ================= -->
+        <section class="view" data-view="advanced">
+          <div class="grid2">
+            <div class="panel">
+              <div class="panel-head"><h3>Click Speed</h3>
+                <div class="segmented sm" id="a-speedmode">
+                  <button data-v="rate" class="active">Rate</button>
+                  <button data-v="interval">Interval</button>
+                </div>
+              </div>
+              <p class="muted">How fast the auto clicker clicks.</p>
+              <div class="field-lg">
+                <input id="a-cps" type="number" min="1" max="4000" value="100" />
+                <div class="field-side"><span class="field-label" id="a-cps-unit">Clicks / sec</span></div>
+              </div>
+              <div class="hint" id="a-interval-hint">10 ms interval</div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-head"><h3>Hotkey</h3>
+                <div class="segmented sm" id="a-hotkeymode">
+                  <button data-v="toggle" class="active">Toggle</button>
+                  <button data-v="hold">Hold</button>
+                </div>
+              </div>
+              <p class="muted">Press the hotkey to control the clicker.</p>
+              <div class="hotkey-row">
+                <div class="hotkey-display inset" id="a-hotkey">F6</div>
+              </div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-head"><h3>Clicker Type</h3>
+                <div class="segmented sm" id="a-type">
+                  <button data-v="mouse" class="active">Mouse</button>
+                  <button data-v="keyboard">Keyboard</button>
+                </div>
+              </div>
+              <p class="muted">Which button or key the clicker presses.</p>
+              <div class="segmented" id="a-button">
+                <button data-v="Left" class="active">Left</button>
+                <button data-v="Middle">Middle</button>
+                <button data-v="Right">Right</button>
+              </div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-head"><h3>Limits</h3>
+                <label class="switch"><input type="checkbox" id="a-limit-on"><span class="track"></span></label>
+              </div>
+              <p class="muted">Stop after a number of clicks or a time.</p>
+              <div class="limit-row" id="a-limit-body">
+                <input id="a-limit-val" type="number" min="1" value="1000" disabled />
+                <div class="segmented sm" id="a-limit-kind">
+                  <button data-v="clicks" class="active">Clicks</button>
+                  <button data-v="time">Seconds</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-head"><h3>Duty Cycle</h3></div>
+              <p class="muted">How long the button is held per click.</p>
+              <div class="slider-row">
+                <input type="range" id="a-duty" min="0" max="90" value="0" />
+                <span class="slider-val" id="a-duty-val">0%</span>
+              </div>
+            </div>
+
+            <div class="panel">
+              <div class="panel-head"><h3>Speed Randomization</h3>
+                <label class="switch"><input type="checkbox" id="a-rand-on"><span class="track"></span></label>
+              </div>
+              <p class="muted">Vary the click speed by a percentage.</p>
+              <div class="slider-row">
+                <input type="range" id="a-rand" min="0" max="90" value="0" disabled />
+                <span class="slider-val" id="a-rand-val">0%</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ================= ZONES ================= -->
+        <section class="view" data-view="zones">
+          <div class="grid2">
+            <div class="panel">
+              <div class="panel-head"><h3>Corner Stop</h3>
+                <label class="switch"><input type="checkbox" id="z-corner" checked><span class="track"></span></label>
+              </div>
+              <p class="muted">Stops the clicker when the cursor enters a screen corner. A safety net.</p>
+              <div class="quad">
+                <input type="number" value="50" /><input type="number" value="50" />
+                <input type="number" value="50" /><input type="number" value="50" />
+              </div>
+            </div>
+            <div class="panel">
+              <div class="panel-head"><h3>Edge Stop</h3>
+                <label class="switch"><input type="checkbox" id="z-edge" checked><span class="track"></span></label>
+              </div>
+              <p class="muted">Stops the clicker when the cursor reaches a screen edge. A safety net.</p>
+              <div class="quad">
+                <input type="number" value="40" /><input type="number" value="40" />
+                <input type="number" value="40" /><input type="number" value="40" />
+              </div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h3>Custom Stop Zones</h3>
+              <label class="switch"><input type="checkbox" id="z-custom"><span class="track"></span></label>
+            </div>
+            <p class="muted">Draw zones on screen. The clicker stops when the cursor moves inside one.</p>
+            <div class="empty">
+              <button class="primary ghost" id="z-add">Add Zone</button>
+              <p class="empty-cap">No zones yet</p>
+            </div>
+          </div>
+        </section>
+
+        <!-- ================= CLICK POINTS ================= -->
+        <section class="view" data-view="points">
+          <div class="panel">
+            <div class="panel-head"><h3>Click Points</h3>
+              <label class="switch"><input type="checkbox" id="p-enable"><span class="track"></span></label>
+            </div>
+            <p class="muted">Click a list of spots on screen one after another. Each spot uses the current speed.</p>
+            <button class="primary ghost" id="p-pick">Start Picking</button>
+            <div class="empty">
+              <p class="empty-cap">No click points yet</p>
+              <p class="empty-sub">Hit Start Picking, then click spots on screen.</p>
+            </div>
+          </div>
+        </section>
+
+        <!-- ================= SETTINGS ================= -->
+        <section class="view settings" data-view="settings">
+          <aside class="subnav">
+            <button data-page="behavior" class="active">Behavior</button>
+            <button data-page="appearance">Appearance</button>
+            <button data-page="keybinds">Keybinds</button>
+            <button data-page="presets">Presets</button>
+            <button data-page="maintenance">Maintenance</button>
+          </aside>
+          <div class="subpages">
+            <div class="subpage active" data-page="behavior">
+              <div class="panel">
+                <div class="setting"><div><b>Always on Top</b><span>Keep the window above others.</span></div>
+                  <label class="switch"><input type="checkbox" id="b-ontop"><span class="track"></span></label></div>
+                <div class="setting"><div><b>Stop Reason Alert</b><span>Notify when the clicker stops.</span></div>
+                  <label class="switch"><input type="checkbox" id="b-alert" checked><span class="track"></span></label></div>
+                <div class="setting"><div><b>Remember Window Position</b><span>Reopen where you left it.</span></div>
+                  <label class="switch"><input type="checkbox" id="b-rememberpos" checked><span class="track"></span></label></div>
+                <div class="setting"><div><b>Extended Click Speed Limit</b><span>Allow speeds beyond 2000 CPS (up to 4000).</span></div>
+                  <label class="switch"><input type="checkbox" id="b-extended"><span class="track"></span></label></div>
+              </div>
+            </div>
+
+            <div class="subpage" data-page="appearance">
+              <div class="panel">
+                <div class="setting"><div><b>Theme</b><span>Dark or light base.</span></div>
+                  <div class="segmented sm" id="ap-theme">
+                    <button data-v="dark" class="active">Dark</button>
+                    <button data-v="light">Light</button>
+                  </div></div>
+                <div class="setting"><div><b>Accent Color</b><span>The primary accent.</span></div>
+                  <div class="accent-row">
+                    <input type="color" id="ap-accent" value="#22c55e" />
+                    <button class="mini" id="ap-accent-reset">Reset</button>
+                  </div></div>
+              </div>
+              <div class="panel">
+                <div class="swatches" id="ap-swatches"></div>
+              </div>
+            </div>
+
+            <div class="subpage" data-page="keybinds">
+              <div class="panel">
+                <p class="muted">Global hotkey for start/stop. Registered even when unfocused.</p>
+                <div class="setting"><div><b>Toggle / Hold key</b><span>Default F6.</span></div>
+                  <div class="hotkey-display inset sm" id="kb-toggle">F6</div></div>
+              </div>
+            </div>
+
+            <div class="subpage" data-page="presets">
+              <div class="panel">
+                <div class="preset-save">
+                  <input id="preset-name" placeholder="Preset name" />
+                  <button class="mini accent" id="preset-add">Save</button>
+                </div>
+              </div>
+              <div id="preset-list"></div>
+            </div>
+
+            <div class="subpage" data-page="maintenance">
+              <div class="panel">
+                <div class="setting"><div><b>Reset All Settings</b><span>Restore defaults.</span></div>
+                  <button class="mini danger" id="mt-reset">Reset</button></div>
+                <div class="setting"><div><b>Profile Location</b><span id="mt-path">%APPDATA%\AutoClicker</span></div></div>
+                <div class="setting"><div><b>Engine</b><span id="mt-engine">—</span></div></div>
+              </div>
+            </div>
+          </div>
+        </section>
       </main>
+
+      <footer class="statusbar">
+        <span id="status-left">No preset active</span>
+        <span id="status-right">v0.1.0</span>
+      </footer>
     </div>
     <script src="main.js"></script>
   </body>
