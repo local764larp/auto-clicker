@@ -85,6 +85,8 @@ mod tests {
             limit_clicks: 0,
             limit_ns: 0,
             batch_size: 1,
+            duty_pct: 0,
+            randomize_pct: 0,
         }
     }
 

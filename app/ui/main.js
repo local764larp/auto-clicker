@@ -14,6 +14,7 @@ let cfg = {
   schema: 1, cps: 100, button: "Left", position_mode: "FollowCursor",
   fixed_x: 0, fixed_y: 0, limit_clicks: 0, limit_ns: 0,
   toggle_vk: 0x75, hold_vk: 0, high_priority: false,
+  duty_pct: 0, randomize_pct: 0,
 };
 
 let saveTimer = null;
@@ -105,10 +106,11 @@ limitVal.addEventListener("input", applyLimit);
 segmented("a-limit-kind", (v) => { limitKind = v; applyLimit(); });
 
 const duty = $("#a-duty"), dutyVal = $("#a-duty-val");
-duty.addEventListener("input", () => { dutyVal.textContent = duty.value + "%"; prefs.duty = +duty.value; savePrefs(); });
+duty.addEventListener("input", () => { dutyVal.textContent = duty.value + "%"; cfg.duty_pct = +duty.value; pushConfig(); });
 const randOn = $("#a-rand-on"), rand = $("#a-rand"), randVal = $("#a-rand-val");
-randOn.addEventListener("change", () => { rand.disabled = !randOn.checked; prefs.randOn = randOn.checked; savePrefs(); });
-rand.addEventListener("input", () => { randVal.textContent = rand.value + "%"; prefs.rand = +rand.value; savePrefs(); });
+function applyRand() { cfg.randomize_pct = randOn.checked ? +rand.value : 0; rand.disabled = !randOn.checked; pushConfig(); }
+randOn.addEventListener("change", () => { prefs.randOn = randOn.checked; savePrefs(); applyRand(); });
+rand.addEventListener("input", () => { randVal.textContent = rand.value + "%"; applyRand(); });
 
 // ---------- Behavior ----------
 $("#b-ontop").addEventListener("change", (e) => { win.setAlwaysOnTop(e.target.checked); $("#pin").classList.toggle("on", e.target.checked); prefs.ontop = e.target.checked; savePrefs(); });
@@ -190,6 +192,8 @@ function syncUIFromCfg() {
   limitVal.disabled = !limitOn.checked;
   if (cfg.limit_ns > 0) { limitKind = "time"; limitVal.value = cfg.limit_ns / 1_000_000_000; segSet("a-limit-kind", "time"); }
   else if (cfg.limit_clicks > 0) { limitKind = "clicks"; limitVal.value = cfg.limit_clicks; segSet("a-limit-kind", "clicks"); }
+  duty.value = cfg.duty_pct; dutyVal.textContent = cfg.duty_pct + "%";
+  if (cfg.randomize_pct > 0) { randOn.checked = true; rand.disabled = false; rand.value = cfg.randomize_pct; randVal.textContent = cfg.randomize_pct + "%"; }
   updateIntervalHint();
 }
 

@@ -23,6 +23,8 @@ fn apply_to_shared(s: &SharedState, p: &Profile) {
     s.set_fixed_point(p.fixed_x, p.fixed_y);
     s.set_limit_clicks(p.limit_clicks);
     s.set_limit_ns(p.limit_ns);
+    s.set_duty_pct(p.duty_pct);
+    s.set_randomize_pct(p.randomize_pct);
 }
 
 #[derive(serde::Serialize)]

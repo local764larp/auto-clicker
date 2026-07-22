@@ -65,6 +65,12 @@ pub struct Config {
     pub limit_clicks: u64,
     pub limit_ns: u64,
     pub batch_size: u16,
+    /// Fraction of the interval the button is held down, in percent (0 = a
+    /// press/release with no hold). Only honoured at `batch_size == 1`.
+    pub duty_pct: u8,
+    /// Interval jitter, in percent. Each period is scaled by a random factor in
+    /// `[1 - r, 1 + r]`. 0 = perfectly regular.
+    pub randomize_pct: u8,
 }
 
 /// Shared between the GUI/host thread and the engine thread. Every field is an
@@ -83,6 +89,8 @@ pub struct SharedState {
     clicks_emitted: AtomicU64,
     engine_state: AtomicU8,
     batch_size: AtomicU16,
+    duty_pct: AtomicU8,
+    randomize_pct: AtomicU8,
 }
 
 impl Default for SharedState {
@@ -106,6 +114,8 @@ impl SharedState {
             clicks_emitted: AtomicU64::new(0),
             engine_state: AtomicU8::new(EngineState::Idle as u8),
             batch_size: AtomicU16::new(1),
+            duty_pct: AtomicU8::new(0),
+            randomize_pct: AtomicU8::new(0),
         }
     }
 
@@ -127,6 +137,8 @@ impl SharedState {
             limit_clicks: self.limit_clicks.load(Ordering::Relaxed),
             limit_ns: self.limit_ns.load(Ordering::Relaxed),
             batch_size: self.batch_size.load(Ordering::Relaxed),
+            duty_pct: self.duty_pct.load(Ordering::Relaxed),
+            randomize_pct: self.randomize_pct.load(Ordering::Relaxed),
         }
     }
 
@@ -185,6 +197,12 @@ impl SharedState {
     }
     pub fn set_batch_size(&self, v: u16) {
         self.batch_size.store(v.max(1), Ordering::Relaxed);
+    }
+    pub fn set_duty_pct(&self, v: u8) {
+        self.duty_pct.store(v.min(95), Ordering::Relaxed);
+    }
+    pub fn set_randomize_pct(&self, v: u8) {
+        self.randomize_pct.store(v.min(95), Ordering::Relaxed);
     }
 }
 

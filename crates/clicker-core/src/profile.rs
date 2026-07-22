@@ -40,6 +40,12 @@ pub struct Profile {
     /// Hold-to-click trigger virtual-key; `0` disables hold mode.
     pub hold_vk: u32,
     pub high_priority: bool,
+    /// Fraction of the interval the button is held per click, in percent.
+    #[serde(default)]
+    pub duty_pct: u8,
+    /// Interval jitter, in percent.
+    #[serde(default)]
+    pub randomize_pct: u8,
 }
 
 impl Default for Profile {
@@ -56,6 +62,8 @@ impl Default for Profile {
             toggle_vk: DEFAULT_TOGGLE_VK,
             hold_vk: 0,
             high_priority: false,
+            duty_pct: 0,
+            randomize_pct: 0,
         }
     }
 }
@@ -71,6 +79,8 @@ impl Profile {
         if self.hold_vk == VK_F8 {
             self.hold_vk = 0; // disable rather than fight F8
         }
+        self.duty_pct = self.duty_pct.min(95);
+        self.randomize_pct = self.randomize_pct.min(95);
         self.schema = SCHEMA_VERSION;
         self
     }

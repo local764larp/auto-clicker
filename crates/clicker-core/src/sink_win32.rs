@@ -164,6 +164,66 @@ impl ClickSink for SendInputSink {
 
         Ok(count as u16)
     }
+
+    /// Press the button down (one event, plus an optional move). Paired with
+    /// `release` by the engine's duty-cycle path.
+    fn press(&mut self, button: Button, pos: Option<(i32, i32)>) -> Result<(), SinkError> {
+        let (down, _up) = down_up_flags(button);
+        let (move_flags, dx, dy) = match pos {
+            Some((x, y)) => {
+                let (nx, ny) = normalize_abs(x, y, self.vs);
+                (MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, nx, ny)
+            }
+            None => (MOUSE_EVENT_FLAGS(0), 0, 0),
+        };
+        self.buf[0] = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx,
+                    dy,
+                    mouseData: 0,
+                    dwFlags: down | move_flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        // SAFETY: buf[0] is a fully initialised INPUT; the size matches.
+        let inserted = unsafe { SendInput(&self.buf[..1], core::mem::size_of::<INPUT>() as i32) };
+        if inserted != 1 {
+            // SAFETY: reads thread-local error state.
+            let last_error = unsafe { GetLastError() }.0;
+            return Err(SinkError::Blocked { inserted, expected: 1, last_error });
+        }
+        Ok(())
+    }
+
+    /// Release the button (one up event).
+    fn release(&mut self, button: Button) -> Result<(), SinkError> {
+        let (_down, up) = down_up_flags(button);
+        self.buf[0] = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 0,
+                    dy: 0,
+                    mouseData: 0,
+                    dwFlags: up,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        // SAFETY: buf[0] is a fully initialised INPUT; the size matches.
+        let inserted = unsafe { SendInput(&self.buf[..1], core::mem::size_of::<INPUT>() as i32) };
+        if inserted != 1 {
+            // SAFETY: reads thread-local error state.
+            let last_error = unsafe { GetLastError() }.0;
+            return Err(SinkError::Blocked { inserted, expected: 1, last_error });
+        }
+        Ok(())
+    }
 }
 
 #[cfg(all(test, windows))]

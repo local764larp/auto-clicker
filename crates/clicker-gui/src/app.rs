@@ -130,6 +130,8 @@ mod win {
                 toggle_vk: self.toggle_vk,
                 hold_vk: self.hold_vk,
                 high_priority: self.high_priority,
+                duty_pct: cfg.duty_pct,
+                randomize_pct: cfg.randomize_pct,
             }
         }
 
