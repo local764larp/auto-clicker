@@ -14,11 +14,39 @@ pub struct Engine<C, W, S> {
     clock: C,
     waiter: W,
     sink: S,
+    /// xorshift state for interval jitter. Seeded deterministically so tests are
+    /// reproducible; the hot loop advances it with no allocation.
+    rng: u64,
+}
+
+/// One xorshift64 step. Cheap, no allocation, adequate for timing jitter.
+#[inline]
+fn xorshift(state: &mut u64) -> u64 {
+    let mut x = *state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *state = x;
+    x
+}
+
+/// Scale `interval` by a random factor in `[1 - r, 1 + r]` where `r =
+/// pct/100`. Returns `interval` unchanged when `pct == 0`.
+#[inline]
+fn jitter(interval: u64, pct: u8, rng: &mut u64) -> u64 {
+    if pct == 0 || interval == 0 {
+        return interval;
+    }
+    let r = (pct.min(95) as f64) / 100.0;
+    // Uniform in [0, 1).
+    let u = (xorshift(rng) >> 11) as f64 / (1u64 << 53) as f64;
+    let factor = 1.0 - r + u * (2.0 * r);
+    (interval as f64 * factor).round() as u64
 }
 
 impl<C: Clock, W: Waiter, S: ClickSink> Engine<C, W, S> {
     pub fn new(clock: C, waiter: W, sink: S) -> Self {
-        Self { clock, waiter, sink }
+        Self { clock, waiter, sink, rng: 0x9E3779B97F4A7C15 }
     }
 
     pub fn sink(&self) -> &S {
@@ -35,6 +63,8 @@ impl<C: Clock, W: Waiter, S: ClickSink> Engine<C, W, S> {
         let mut run_start_ns: u64 = 0;
         let mut clicks_this_run: u64 = 0;
         let mut was_running = false;
+        // Index into the click-point sequence (sequence mode only).
+        let mut seq_index: usize = 0;
 
         // `clicks_emitted` is monotonic for the process lifetime; limits are
         // per-run. Seed the local total from whatever the counter already holds.
@@ -58,11 +88,15 @@ impl<C: Clock, W: Waiter, S: ClickSink> Engine<C, W, S> {
                 was_running = true;
                 run_start_ns = now_ns;
                 clicks_this_run = 0;
+                seq_index = 0;
                 deadline_ns = now_ns;
                 shared.set_engine_state(EngineState::Running);
             }
 
-            let cfg = shared.snapshot();
+            let mut cfg = shared.snapshot();
+            // Speed randomization jitters the interval that drives deadline
+            // advancement. Zero pct leaves it exactly regular (drift-free).
+            cfg.interval_ns = jitter(cfg.interval_ns, cfg.randomize_pct, &mut self.rng);
             let state = RunState {
                 now_ns,
                 deadline_ns,
@@ -80,11 +114,23 @@ impl<C: Clock, W: Waiter, S: ClickSink> Engine<C, W, S> {
                     self.waiter.wait_until(until_ns, &self.clock);
                 }
                 Decision::Fire { next_deadline_ns } => {
-                    // Batching only applies unthrottled: batched events carry no
-                    // temporal spacing, so batching a throttled rate would
-                    // destroy the requested interval.
-                    let mut batch: u64 =
-                        if cfg.interval_ns == 0 { cfg.batch_size.max(1) as u64 } else { 1 };
+                    // Click-point sequence: this click lands on the current
+                    // point, and the index advances afterward. An empty list
+                    // falls through to the normal position.
+                    let seq = cfg.sequence && shared.points_len() > 0;
+                    let position = if seq {
+                        Some(shared.point(seq_index))
+                    } else {
+                        cfg.position
+                    };
+
+                    // Batching only applies unthrottled and never in sequence
+                    // mode (each click may target a different point).
+                    let mut batch: u64 = if cfg.interval_ns == 0 && !seq {
+                        cfg.batch_size.max(1) as u64
+                    } else {
+                        1
+                    };
 
                     // Never overshoot a click limit just because of batching.
                     if cfg.limit_clicks != 0 {
@@ -96,12 +142,45 @@ impl<C: Clock, W: Waiter, S: ClickSink> Engine<C, W, S> {
                         continue;
                     }
 
-                    match self.sink.emit_batch(cfg.button, cfg.position, batch as u16) {
+                    // Duty cycle: hold the button down for a fraction of the
+                    // interval. Only at batch == 1 (a batched syscall carries no
+                    // spacing, so a hold is meaningless there) and when there is
+                    // a real interval to take a fraction of.
+                    let use_duty = cfg.duty_pct > 0 && batch == 1 && cfg.interval_ns > 0;
+                    let result = if use_duty {
+                        let hold = cfg.interval_ns / 100 * cfg.duty_pct as u64;
+                        match self.sink.press(cfg.button, position) {
+                            Ok(()) => {
+                                self.waiter
+                                    .wait_until(self.clock.now_ns() + hold, &self.clock);
+                                self.sink.release(cfg.button).map(|()| 1u16)
+                            }
+                            Err(e) => Err(e),
+                        }
+                    } else {
+                        self.sink.emit_batch(cfg.button, position, batch as u16)
+                    };
+
+                    match result {
                         Ok(n) => {
                             clicks_this_run += n as u64;
                             total_clicks += n as u64;
                             shared.store_clicks(total_clicks);
                             deadline_ns = next_deadline_ns;
+
+                            // Advance the sequence; stop after a full pass if asked.
+                            if seq {
+                                let len = shared.points_len();
+                                seq_index += 1;
+                                if seq_index >= len {
+                                    seq_index = 0;
+                                    if cfg.stop_when_complete {
+                                        shared.set_running(false);
+                                        shared.set_engine_state(EngineState::StoppedByLimit);
+                                        was_running = false;
+                                    }
+                                }
+                            }
                         }
                         Err(_e) => {
                             // Blocked input is a distinct state, never a silent
@@ -275,6 +354,107 @@ mod tests {
         // counter, the second run would emit zero.
         assert_eq!(eng.sink().total(), 10);
         assert_eq!(shared.clicks_emitted(), 10, "counter must stay monotonic across runs");
+    }
+
+    #[test]
+    fn duty_cycle_holds_the_button_for_a_fraction_of_the_interval() {
+        let (_clock, mut eng) = harness(0);
+        let shared = SharedState::new();
+        shared.set_interval_ns(1_000_000); // 1 ms
+        shared.set_duty_pct(50);
+        shared.set_limit_clicks(5);
+        shared.set_running(true);
+
+        run_until(&mut eng, &shared, EngineState::StoppedByLimit);
+
+        assert_eq!(eng.sink().total(), 5);
+        assert_eq!(eng.sink().holds().len(), 5, "each click should hold");
+        for h in eng.sink().holds() {
+            assert_eq!(*h, 500_000, "hold should be 50% of the 1 ms interval");
+        }
+    }
+
+    #[test]
+    fn randomization_varies_intervals_within_bounds() {
+        let (_clock, mut eng) = harness(0);
+        let shared = SharedState::new();
+        shared.set_interval_ns(1_000_000);
+        shared.set_randomize_pct(20);
+        shared.set_limit_clicks(200);
+        shared.set_running(true);
+
+        run_until(&mut eng, &shared, EngineState::StoppedByLimit);
+
+        let ts: Vec<u64> = eng.sink().clicks().iter().map(|c| c.at_ns).collect();
+        let diffs: Vec<u64> = ts.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(!diffs.is_empty());
+        for d in &diffs {
+            assert!(
+                (790_000..=1_210_000).contains(d),
+                "jittered interval {d} outside ±20%"
+            );
+        }
+        assert!(
+            !diffs.iter().all(|d| *d == diffs[0]),
+            "randomization produced no variation"
+        );
+    }
+
+    #[test]
+    fn zero_randomization_stays_drift_free() {
+        let (_clock, mut eng) = harness(0);
+        let shared = SharedState::new();
+        shared.set_interval_ns(1_000_000);
+        shared.set_randomize_pct(0);
+        shared.set_limit_clicks(50);
+        shared.set_running(true);
+
+        run_until(&mut eng, &shared, EngineState::StoppedByLimit);
+        for (i, c) in eng.sink().clicks().iter().enumerate() {
+            assert_eq!(c.at_ns, i as u64 * 1_000_000, "no jitter must mean no drift");
+        }
+    }
+
+    #[test]
+    fn sequence_mode_walks_the_points_in_order() {
+        let (_clock, mut eng) = harness(0);
+        let shared = SharedState::new();
+        shared.set_interval_ns(1_000_000);
+        shared.set_position_mode(PositionMode::Sequence);
+        shared.set_points(&[(10, 10), (20, 20), (30, 30)]);
+        shared.set_limit_clicks(6); // exactly two full passes
+        shared.set_running(true);
+
+        run_until(&mut eng, &shared, EngineState::StoppedByLimit);
+
+        let seq: Vec<Option<(i32, i32)>> = eng.sink().clicks().iter().map(|c| c.pos).collect();
+        assert_eq!(
+            seq,
+            vec![
+                Some((10, 10)),
+                Some((20, 20)),
+                Some((30, 30)),
+                Some((10, 10)),
+                Some((20, 20)),
+                Some((30, 30)),
+            ]
+        );
+    }
+
+    #[test]
+    fn sequence_stop_when_complete_stops_after_one_pass() {
+        let (_clock, mut eng) = harness(0);
+        let shared = SharedState::new();
+        shared.set_interval_ns(1_000_000);
+        shared.set_position_mode(PositionMode::Sequence);
+        shared.set_points(&[(1, 1), (2, 2), (3, 3), (4, 4)]);
+        shared.set_stop_when_complete(true);
+        shared.set_running(true);
+
+        run_until(&mut eng, &shared, EngineState::StoppedByLimit);
+
+        // Exactly one pass: 4 clicks, then stop.
+        assert_eq!(eng.sink().total(), 4);
     }
 
     #[test]

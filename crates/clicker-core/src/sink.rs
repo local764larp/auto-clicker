@@ -35,6 +35,20 @@ pub trait ClickSink {
     fn emit(&mut self, button: Button, pos: Option<(i32, i32)>) -> Result<(), SinkError> {
         self.emit_batch(button, pos, 1).map(|_| ())
     }
+
+    /// Press the button down without releasing. Paired with [`ClickSink::release`]
+    /// by the engine's duty-cycle path so the button is held for a fraction of
+    /// the interval. The default is a full click (no real hold), which lets
+    /// sinks that do not support holding degrade gracefully.
+    fn press(&mut self, button: Button, pos: Option<(i32, i32)>) -> Result<(), SinkError> {
+        self.emit_batch(button, pos, 1).map(|_| ())
+    }
+
+    /// Release a previously pressed button. Default: nothing (the default
+    /// `press` already completed the click).
+    fn release(&mut self, _button: Button) -> Result<(), SinkError> {
+        Ok(())
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -53,6 +67,8 @@ pub struct RecordingSink {
     clicks: Vec<RecordedClick>,
     fail_after: Option<u64>,
     total: u64,
+    pending_down: Option<(Button, Option<(i32, i32)>, u64)>,
+    holds: Vec<u64>,
 }
 
 impl RecordingSink {
@@ -61,7 +77,21 @@ impl RecordingSink {
     }
 
     pub fn with_cost(clock: std::sync::Arc<crate::clock::VirtualClock>, cost_ns: u64) -> Self {
-        Self { clock, cost_ns, clicks: Vec::new(), fail_after: None, total: 0 }
+        Self {
+            clock,
+            cost_ns,
+            clicks: Vec::new(),
+            fail_after: None,
+            total: 0,
+            pending_down: None,
+            holds: Vec::new(),
+        }
+    }
+
+    /// Durations, in ns, that the button was held between press and release
+    /// (duty-cycle path only). Empty for the fast batched path.
+    pub fn holds(&self) -> &[u64] {
+        &self.holds
     }
 
     /// After `n` successful clicks, every subsequent emit returns `Blocked`.
@@ -103,6 +133,31 @@ impl ClickSink for RecordingSink {
             }
         }
         Ok(count)
+    }
+
+    fn press(&mut self, button: Button, pos: Option<(i32, i32)>) -> Result<(), SinkError> {
+        use crate::clock::Clock;
+        if let Some(limit) = self.fail_after {
+            if self.total >= limit {
+                return Err(SinkError::Blocked { inserted: 0, expected: 2, last_error: 5 });
+            }
+        }
+        self.pending_down = Some((button, pos, self.clock.now_ns()));
+        Ok(())
+    }
+
+    fn release(&mut self, _button: Button) -> Result<(), SinkError> {
+        use crate::clock::Clock;
+        if let Some((button, pos, down_ns)) = self.pending_down.take() {
+            let now = self.clock.now_ns();
+            self.clicks.push(RecordedClick { button, pos, at_ns: down_ns });
+            self.holds.push(now.saturating_sub(down_ns));
+            self.total += 1;
+            if self.cost_ns > 0 {
+                self.clock.advance(self.cost_ns);
+            }
+        }
+        Ok(())
     }
 }
 

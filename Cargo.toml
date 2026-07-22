@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/clicker-core", "crates/clicker-gui", "bench"]
+members = ["crates/clicker-core", "crates/clicker-gui", "bench", "app/src-tauri"]
 
 [workspace.package]
 edition = "2021"

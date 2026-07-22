@@ -85,6 +85,12 @@ mod tests {
             limit_clicks: 0,
             limit_ns: 0,
             batch_size: 1,
+            duty_pct: 0,
+            randomize_pct: 0,
+            click_kind: 0,
+            key_vk: 0x20,
+            sequence: false,
+            stop_when_complete: false,
         }
     }
 

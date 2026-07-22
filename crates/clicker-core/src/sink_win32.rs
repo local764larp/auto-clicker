@@ -1,11 +1,12 @@
-use crate::shared::Button;
+use crate::shared::{Button, SharedState};
 use crate::sink::{ClickSink, SinkError};
+use std::sync::Arc;
 use windows::Win32::Foundation::GetLastError;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
-    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
-    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT,
-    MOUSE_EVENT_FLAGS,
+    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP,
+    MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
+    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+    MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
@@ -164,6 +165,66 @@ impl ClickSink for SendInputSink {
 
         Ok(count as u16)
     }
+
+    /// Press the button down (one event, plus an optional move). Paired with
+    /// `release` by the engine's duty-cycle path.
+    fn press(&mut self, button: Button, pos: Option<(i32, i32)>) -> Result<(), SinkError> {
+        let (down, _up) = down_up_flags(button);
+        let (move_flags, dx, dy) = match pos {
+            Some((x, y)) => {
+                let (nx, ny) = normalize_abs(x, y, self.vs);
+                (MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, nx, ny)
+            }
+            None => (MOUSE_EVENT_FLAGS(0), 0, 0),
+        };
+        self.buf[0] = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx,
+                    dy,
+                    mouseData: 0,
+                    dwFlags: down | move_flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        // SAFETY: buf[0] is a fully initialised INPUT; the size matches.
+        let inserted = unsafe { SendInput(&self.buf[..1], core::mem::size_of::<INPUT>() as i32) };
+        if inserted != 1 {
+            // SAFETY: reads thread-local error state.
+            let last_error = unsafe { GetLastError() }.0;
+            return Err(SinkError::Blocked { inserted, expected: 1, last_error });
+        }
+        Ok(())
+    }
+
+    /// Release the button (one up event).
+    fn release(&mut self, button: Button) -> Result<(), SinkError> {
+        let (_down, up) = down_up_flags(button);
+        self.buf[0] = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 0,
+                    dy: 0,
+                    mouseData: 0,
+                    dwFlags: up,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        // SAFETY: buf[0] is a fully initialised INPUT; the size matches.
+        let inserted = unsafe { SendInput(&self.buf[..1], core::mem::size_of::<INPUT>() as i32) };
+        if inserted != 1 {
+            // SAFETY: reads thread-local error state.
+            let last_error = unsafe { GetLastError() }.0;
+            return Err(SinkError::Blocked { inserted, expected: 1, last_error });
+        }
+        Ok(())
+    }
 }
 
 #[cfg(all(test, windows))]
@@ -203,5 +264,115 @@ mod tests {
     fn batch_buffer_is_preallocated_to_the_maximum() {
         let s = SendInputSink::new();
         assert_eq!(s.buffer_capacity(), MAX_BATCH * 2);
+    }
+}
+
+/// Production sink that clicks a mouse button or presses a keyboard key,
+/// chosen per emit by `SharedState::click_kind`. Keyboard mode presses the
+/// virtual-key in `SharedState::key_vk`. Wraps [`SendInputSink`] for the mouse
+/// path so that logic is not duplicated.
+pub struct SystemInputSink {
+    shared: Arc<SharedState>,
+    mouse: SendInputSink,
+    kbuf: Vec<INPUT>,
+}
+
+fn key_input(vk: u16, up: bool) -> INPUT {
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(vk),
+                wScan: 0,
+                dwFlags: if up { KEYEVENTF_KEYUP } else { Default::default() },
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+impl SystemInputSink {
+    pub fn new(shared: Arc<SharedState>) -> Self {
+        Self {
+            shared,
+            mouse: SendInputSink::new(),
+            kbuf: vec![INPUT::default(); MAX_BATCH * 2],
+        }
+    }
+
+    fn keyboard(&self) -> bool {
+        self.shared.click_kind() == 1
+    }
+
+    fn key_batch(&mut self, count: u16) -> Result<u16, SinkError> {
+        let count = (count as usize).min(MAX_BATCH);
+        if count == 0 {
+            return Ok(0);
+        }
+        let vk = self.shared.key_vk() as u16;
+        for i in 0..count {
+            self.kbuf[i * 2] = key_input(vk, false);
+            self.kbuf[i * 2 + 1] = key_input(vk, true);
+        }
+        let events = count * 2;
+        // SAFETY: `kbuf` holds `events` initialised INPUT structs; the size
+        // matches the element type and SendInput does not retain the pointer.
+        let inserted =
+            unsafe { SendInput(&self.kbuf[..events], core::mem::size_of::<INPUT>() as i32) };
+        if inserted as usize != events {
+            // SAFETY: reads thread-local error state.
+            let last_error = unsafe { GetLastError() }.0;
+            return Err(SinkError::Blocked { inserted, expected: events as u32, last_error });
+        }
+        Ok(count as u16)
+    }
+
+    fn key_edge(&mut self, up: bool) -> Result<(), SinkError> {
+        let vk = self.shared.key_vk() as u16;
+        self.kbuf[0] = key_input(vk, up);
+        // SAFETY: kbuf[0] is initialised; size matches.
+        let inserted = unsafe { SendInput(&self.kbuf[..1], core::mem::size_of::<INPUT>() as i32) };
+        if inserted != 1 {
+            // SAFETY: reads thread-local error state.
+            let last_error = unsafe { GetLastError() }.0;
+            return Err(SinkError::Blocked { inserted, expected: 1, last_error });
+        }
+        Ok(())
+    }
+
+    pub fn refresh_virtual_screen(&mut self) {
+        self.mouse.refresh_virtual_screen();
+    }
+}
+
+impl ClickSink for SystemInputSink {
+    fn emit_batch(
+        &mut self,
+        button: Button,
+        pos: Option<(i32, i32)>,
+        count: u16,
+    ) -> Result<u16, SinkError> {
+        if self.keyboard() {
+            self.key_batch(count)
+        } else {
+            self.mouse.emit_batch(button, pos, count)
+        }
+    }
+
+    fn press(&mut self, button: Button, pos: Option<(i32, i32)>) -> Result<(), SinkError> {
+        if self.keyboard() {
+            self.key_edge(false)
+        } else {
+            self.mouse.press(button, pos)
+        }
+    }
+
+    fn release(&mut self, button: Button) -> Result<(), SinkError> {
+        if self.keyboard() {
+            self.key_edge(true)
+        } else {
+            self.mouse.release(button)
+        }
     }
 }
