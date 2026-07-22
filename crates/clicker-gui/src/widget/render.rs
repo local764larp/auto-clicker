@@ -210,3 +210,102 @@ pub unsafe fn blit_specs(
     }
     Ok(())
 }
+
+#[cfg(all(test, windows))]
+mod golden {
+    //! State -> appearance is wired, on WARP.
+    //!
+    //! The pure test `state_maps_to_elevation` locks the mapping constant; this
+    //! proves the mapping actually changes rendered pixels — a pressed widget
+    //! renders visibly different from an idle one — so a regression that broke
+    //! the state-driven elevation would be caught even if the constant survived.
+
+    use super::*;
+    use crate::render::color::Palette;
+    use crate::render::device::{create_context, DriverKind};
+    use windows::Win32::Graphics::Direct2D::Common::{
+        D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_SIZE_U,
+    };
+    use windows::Win32::Graphics::Direct2D::{
+        D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_CPU_READ, D2D1_BITMAP_OPTIONS_TARGET,
+        D2D1_BITMAP_PROPERTIES1, D2D1_MAP_OPTIONS_READ,
+    };
+    use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+
+    fn bitmap_props(dpi: f32) -> D2D1_BITMAP_PROPERTIES1 {
+        D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: dpi,
+            dpiY: dpi,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
+            colorContext: core::mem::ManuallyDrop::new(None),
+        }
+    }
+
+    fn render_state_pixels(state: WidgetState) -> Vec<u8> {
+        let (_d3d, ctx) = create_context(DriverKind::Warp).expect("WARP");
+        let palette = Palette::light();
+        let side = 90.0f32;
+        let surf = crate::render::neumorph::render_surface(
+            &ctx,
+            side,
+            side,
+            16.0,
+            state.elevation(),
+            &palette,
+            1.0,
+        )
+        .expect("render");
+        let m = surf.margin_dip;
+        // SAFETY: WARP context is live; the target and staging bitmaps are
+        // created, drawn, and mapped/unmapped in matched pairs.
+        unsafe {
+            let bw = (side + 2.0 * m).ceil() as u32;
+            let props = bitmap_props(96.0);
+            let target =
+                ctx.CreateBitmap(D2D_SIZE_U { width: bw, height: bw }, None, 0, &props).unwrap();
+            ctx.SetTarget(&target);
+            ctx.BeginDraw();
+            ctx.Clear(Some(&D2D1_COLOR_F { r: palette.base.r, g: palette.base.g, b: palette.base.b, a: 1.0 }));
+            crate::render::neumorph::draw_surface(&ctx, &surf, m, m);
+            ctx.EndDraw(None, None).unwrap();
+
+            let mut sprops = bitmap_props(96.0);
+            sprops.bitmapOptions = D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW;
+            let staging =
+                ctx.CreateBitmap(D2D_SIZE_U { width: bw, height: bw }, None, 0, &sprops).unwrap();
+            staging.CopyFromBitmap(None, &target, None).unwrap();
+            let mapped = staging.Map(D2D1_MAP_OPTIONS_READ).unwrap();
+            let mut px = vec![0u8; (bw * bw * 4) as usize];
+            for row in 0..bw as usize {
+                let src = mapped.bits.add(row * mapped.pitch as usize);
+                core::ptr::copy_nonoverlapping(
+                    src,
+                    px[row * bw as usize * 4..].as_mut_ptr(),
+                    bw as usize * 4,
+                );
+            }
+            staging.Unmap().unwrap();
+            ctx.SetTarget(None);
+            px
+        }
+    }
+
+    #[test]
+    fn pressed_and_idle_render_differently() {
+        let idle = render_state_pixels(WidgetState::Idle);
+        let pressed = render_state_pixels(WidgetState::Pressed);
+        assert_ne!(idle, pressed, "a pressed widget must not look identical to an idle one");
+    }
+
+    #[test]
+    fn disabled_is_flat_and_differs_from_pressed() {
+        let disabled = render_state_pixels(WidgetState::Disabled);
+        let pressed = render_state_pixels(WidgetState::Pressed);
+        assert_eq!(WidgetState::Disabled.elevation(), Elevation::Flat);
+        assert_ne!(disabled, pressed);
+    }
+}
